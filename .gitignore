@@ -1,0 +1,7 @@
+build/
+builddir/
+subprojects/glm/
+subprojects/v4l-utils/
+subprojects/v4l-utils.wrap
+*.log
+reddit-post.md
