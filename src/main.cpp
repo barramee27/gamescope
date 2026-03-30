@@ -894,6 +894,13 @@ int main(int argc, char **argv)
 				eCurrentBackend = gamescope::GamescopeBackend::SDL;
 			}
 			else
+#else
+			if ( bNvidiaDriverLoaded )
+			{
+				fprintf( stderr, "WARNING: NVIDIA driver detected but gamescope was built without SDL2.\n"
+				         "The Wayland backend may not work correctly on NVIDIA in hybrid/nested setups.\n"
+				         "Recommend rebuilding with SDL2 support or using --backend drm.\n" );
+			}
 #endif
 			{
 				eCurrentBackend = gamescope::GamescopeBackend::Wayland;

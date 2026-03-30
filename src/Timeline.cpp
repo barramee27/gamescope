@@ -46,7 +46,13 @@ namespace gamescope
             if ( desc.ulStartingPoint > 0 )
             {
                 uint64_t ulPoint = desc.ulStartingPoint;
-                drmSyncobjTimelineSignal( g_device.drmRenderFd(), &uHandle, &ulPoint, 1 );
+                if ( drmSyncobjTimelineSignal( g_device.drmRenderFd(), &uHandle, &ulPoint, 1 ) != 0 )
+                {
+                    s_TimelineLog.errorf_errno( "CTimeline::Create (NVIDIA): drmSyncobjTimelineSignal failed" );
+                    close( nFd );
+                    drmSyncobjDestroy( g_device.drmRenderFd(), uHandle );
+                    return nullptr;
+                }
             }
 
             return std::make_shared<CTimeline>( nFd, uHandle, nullptr );

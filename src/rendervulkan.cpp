@@ -1522,6 +1522,7 @@ std::shared_ptr<VulkanTimelineSemaphore_t> CVulkanDevice::ImportTimelineSemaphor
 	if ( ( res = vk.ImportSemaphoreFdKHR( m_device, &importFdInfo ) ) != VK_SUCCESS )
 	{
 		vk_errorf( res, "vkImportSemaphoreFdKHR failed" );
+		close( importFdInfo.fd );
 		return nullptr;
 	}
 
@@ -1583,6 +1584,7 @@ std::shared_ptr<VulkanTimelineSemaphore_t> CVulkanDevice::ImportSyncPointAsBinar
 	if ( ( res = vk.ImportSemaphoreFdKHR( m_device, &importInfo ) ) != VK_SUCCESS )
 	{
 		vk_errorf( res, "ImportSyncPointAsBinary: vkImportSemaphoreFdKHR SYNC_FD failed" );
+		close( nSyncFileFd );
 		return nullptr;
 	}
 
