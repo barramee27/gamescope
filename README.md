@@ -1,91 +1,191 @@
-## gamescope: the micro-compositor formerly known as steamcompmgr
+# gamescope
 
-In an embedded session usecase, gamescope does the same thing as steamcompmgr, but with less extra copies and latency:
+Micro-compositor for gaming: the same role as the old `steamcompmgr`, with lower latency and a cleaner path from game frames to the display.
 
- - It's getting game frames through Wayland by way of Xwayland, so there's no copy within X itself before it gets the frame.
- - It can use DRM/KMS to directly flip game frames to the screen, even when stretching or when notifications are up, removing another copy.
- - When it does need to composite with the GPU, it does so with async Vulkan compute, meaning you get to see your frame quick even if the game already has the GPU busy with the next frame.
+## About this repository
 
-It also runs on top of a regular desktop, the 'nested' usecase steamcompmgr didn't support.
+This fork extends [Valve’s gamescope](https://github.com/ValveSoftware/gamescope) with fixes for **NVIDIA proprietary drivers** on Linux, with emphasis on **RTX 40/50 (Blackwell)** and **driver 570+**, especially **hybrid laptops** (NVIDIA dGPU + integrated GPU running the desktop compositor).
 
- - Because the game is running in its own personal Xwayland sandbox desktop, it can't interfere with your desktop and your desktop can't interfere with it.
- - You can spoof a virtual screen with a desired resolution and refresh rate as the only thing the game sees, and control/resize the output as needed. This can be useful in exotic display configurations like ultrawide or multi-monitor setups that involve rotation.
+**Branch with the NVIDIA work:** `feat/nvidia-blackwell-explicit-sync`
 
-It runs on Mesa + AMD or Intel, and could be made to run on other Mesa/DRM drivers with minimal work. AMD requires Mesa 20.3+, Intel requires Mesa 21.2+. For NVIDIA's proprietary driver, version 515.43.04+ is required (make sure the `nvidia-drm.modeset=1` kernel parameter is set).
+Upstream changes should eventually be proposed back to Valve; this README describes behavior on **this branch**.
 
-If running RadeonSI clients with older cards (GFX8 and below), currently have to set `R600_DEBUG=nodcc`, or corruption will be observed until the stack picks up DRM modifiers support.
+### What the NVIDIA patches change
+
+- **Nested Wayland + NVIDIA:** If `/dev/nvidiactl` exists and you run under a Wayland session with `--backend auto` (default), gamescope selects the **SDL** backend instead of the Wayland backend. The Wayland backend shares output via DMA-BUF to the parent compositor, which often **fails on hybrid NVIDIA setups** (invalid `wl_buffer` / broken pipe).
+- **Vulkan:** Detects `VK_DRIVER_ID_NVIDIA_PROPRIETARY`, skips Mesa-only paths (e.g. certain WSI memory import), and applies safer defaults for flippable images and sync.
+- **DRM / KMS:** Disables explicit sync by default on NVIDIA (implicit sync fallback); optionally enables an experimental **SYNC_FD** path via ConVar `drm_nvidia_explicit_sync_via_sync_fd`. Proactively disables `IN_FENCE_FD` where it causes atomic commit failures.
+- **Wayland backend:** If you force `--backend wayland`, DMA-BUF modifiers are checked before `create_immed` to avoid fatal protocol errors; explicit sync is not advertised for NVIDIA clients the same way as on Mesa.
+- **Preemptive upscale / timelines:** NVIDIA-specific semaphore bridging and audited error handling (no silent GPU sync skips, FD leaks fixed).
+
+**Tested by the maintainer:** RTX 5050 Laptop GPU, driver 570, Pop!_OS 24.04 (Wayland), including real games via Steam/Proton.
+
+**Not a guarantee** for every NVIDIA GPU, every driver version, or nouveau. Reports with `nvidia-smi`, distro, and desktop help narrow issues.
+
+---
+
+## Embedded vs nested
+
+In an embedded session, gamescope can flip game frames with DRM/KMS with minimal copying. When nested on a normal desktop:
+
+- The game runs in its own Xwayland sandbox; your desktop and the game do not stomp each other’s windows.
+- You can expose a virtual resolution and refresh rate to the game and scale or letterbox the output (useful for ultrawide and multi-monitor setups).
+
+---
+
+## Requirements
+
+- **Mesa (AMD / Intel):** as upstream: AMD Mesa 20.3+, Intel Mesa 21.2+. Older AMD GFX8 and below may need `R600_DEBUG=nodcc` until modifier support is solid.
+- **NVIDIA proprietary:** DRM modesetting is still recommended (`nvidia-drm.modeset=1` where applicable). This fork targets recent proprietary stacks with Vulkan + DRM syncobj support; very old drivers may not match upstream gamescope’s baseline either.
+
+Build **with SDL2** for nested use on NVIDIA (`sdl2_backend` enabled in Meson).
+
+---
 
 ## Building
 
-```
-git submodule update --init
+```sh
+git clone https://github.com/barramee27/gamescope.git
+cd gamescope
+git checkout feat/nvidia-blackwell-explicit-sync
+git submodule update --init --recursive
+
 meson setup build/
 ninja -C build/
-build/src/gamescope -- <game>
+./build/src/gamescope -- <game or command>
 ```
 
-Install with:
+Install (optional):
 
-```
+```sh
 meson install -C build/ --skip-subprojects
 ```
 
+Use `meson configure build/` to toggle features (e.g. `pipewire`, `drm_backend`, `sdl2_backend`).
+
+---
+
+## NVIDIA: nested desktop usage
+
+### Environment variables (typical hybrid laptop)
+
+Prime offload to the NVIDIA GPU and force GLX to NVIDIA when launching GL apps under Xwayland:
+
+```sh
+export __NV_PRIME_RENDER_OFFLOAD=1
+export __GLX_VENDOR_LIBRARY_NAME=nvidia
+```
+
+If the mouse or keyboard does not respond until you Alt+Tab or click the window, that is usually **X11/SDL focus**, not a failed launch. Click inside the gamescope window once after it appears, or Alt+Tab once.
+
+### SDL on X11 (often helps input under Wayland session)
+
+```sh
+export SDL_VIDEODRIVER=x11
+```
+
+### Example: run gamescope then a game
+
+```sh
+__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia \
+SDL_VIDEODRIVER=x11 \
+/path/to/gamescope/build/src/gamescope -W 1920 -H 1080 -f -- steam steam://rungameid/2231380
+```
+
+Use your real path to the `gamescope` binary (or install prefix).
+
+### Steam per-game launch options
+
+Keep existing options that you still need (Proton, MangoHud, etc.) and **always** end with `-- %command%`.
+
+```sh
+__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia SDL_VIDEODRIVER=x11 /path/to/gamescope -W 1920 -H 1080 -f -- %command%
+```
+
+You do not need to “clear” launch options unless two wrappers conflict; merge env vars on one line when possible.
+
+### Logs
+
+Capture everything to a file:
+
+```sh
+... gamescope ... &> gamescope.log
+```
+
+You should see messages such as **NVIDIA proprietary driver detected** and, under Wayland, **using SDL backend for nested Wayland mode** when the auto-backend logic applies.
+
+### Experimental explicit sync on NVIDIA (optional)
+
+```sh
+GAMESCOPE_CONVAR="drm_nvidia_explicit_sync_via_sync_fd 1"
+```
+
+Only for testing; default remains implicit sync on NVIDIA.
+
+---
+
 ## Keyboard shortcuts
 
-* **Super + F** : Toggle fullscreen
-* **Super + N** : Toggle nearest neighbour filtering
-* **Super + U** : Toggle FSR upscaling
-* **Super + Y** : Toggle NIS upscaling
-* **Super + I** : Increase FSR sharpness by 1
-* **Super + O** : Decrease FSR sharpness by 1
-* **Super + S** : Take screenshot (currently goes to `/tmp/gamescope_$DATE.png`)
-* **Super + G** : Toggle keyboard grab
+- **Super + F** — Toggle fullscreen  
+- **Super + N** — Toggle nearest-neighbour filtering  
+- **Super + U** — Toggle FSR upscaling  
+- **Super + Y** — Toggle NIS upscaling  
+- **Super + I** — Increase FSR sharpness  
+- **Super + O** — Decrease FSR sharpness  
+- **Super + S** — Screenshot (default `/tmp/gamescope_$DATE.png`)  
+- **Super + G** — Toggle keyboard grab  
+
+Run `gamescope --help` for the full list.
+
+---
 
 ## Examples
 
-On any X11 or Wayland desktop, you can set the Steam launch arguments of your game as follows:
-
 ```sh
-# Upscale a 720p game to 1440p with integer scaling
+# Integer-scale 720p content to 1440p
 gamescope -h 720 -H 1440 -S integer -- %command%
 
-# Limit a vsynced game to 30 FPS
+# Cap a vsynced game at 30 FPS
 gamescope -r 30 -- %command%
 
-# Run the game at 1080p, but scale output to a fullscreen 3440×1440 pillarboxed ultrawide window
+# 1080p game, pillarboxed fullscreen on 3440×1440
 gamescope -w 1920 -h 1080 -W 3440 -H 1440 -b -- %command%
 ```
 
-## Options
+---
 
-See `gamescope --help` for a full list of options.
+## Common options
 
-* `-W`, `-H`: set the resolution used by gamescope. Resizing the gamescope window will update these settings. Ignored in embedded mode. If `-H` is specified but `-W` isn't, a 16:9 aspect ratio is assumed. Defaults to 1280×720.
-* `-w`, `-h`: set the resolution used by the game. If `-h` is specified but `-w` isn't, a 16:9 aspect ratio is assumed. Defaults to the values specified in `-W` and `-H`.
-* `-r`: set a frame-rate limit for the game. Specified in frames per second. Defaults to unlimited.
-* `-o`: set a frame-rate limit for the game when unfocused. Specified in frames per second. Defaults to unlimited.
-* `-F fsr`: use AMD FidelityFX™ Super Resolution 1.0 for upscaling
-* `-F nis`: use NVIDIA Image Scaling v1.0.3 for upscaling
-* `-S integer`: use integer scaling.
-* `-S stretch`: use stretch scaling, the game will fill the window. (e.g. 4:3 to 16:9)
-* `-b`: create a border-less window.
-* `-f`: create a full-screen window.
+See `gamescope --help` for everything.
 
-## Reshade support
+| Flag | Meaning |
+|------|--------|
+| `-W`, `-H` | Output (gamescope) resolution; ignored in embedded DRM mode. Default 1280×720. |
+| `-w`, `-h` | Game-internal resolution; defaults follow `-W`/`-H`. |
+| `-r` | FPS limit while focused. |
+| `-o` | FPS limit while unfocused. |
+| `-F fsr` / `-F nis` | FSR / NIS upscaling. |
+| `-S integer` / `-S stretch` | Scaling mode. |
+| `-b` | Borderless window. |
+| `-f` | Fullscreen window. |
+| `--backend` | `auto`, `sdl`, `wayland`, `drm`, `headless`, … |
 
-Gamescope supports a subset of Reshade effects/shaders using the `--reshade-effect [path]` and `--reshade-technique-idx [idx]` command line parameters.
+---
 
-This provides an easy way to do shader effects (ie. CRT shader, film grain, debugging HDR with histograms, etc) on top of whatever is being displayed in Gamescope without having to hook into the underlying process.
+## Reshade
 
-Uniform/shader options can be modified programmatically via the `gamescope-reshade` wayland interface. Otherwise, they will just use their initializer values.
+Gamescope can load a subset of ReShade effects via `--reshade-effect` and `--reshade-technique-idx`. That adds latency (work on the general graphics/compute queue). For simple color transforms, prefer built-in LUT/CTM paths where available. See upstream docs and `gamescope --help`.
 
-Using Reshade effects will increase latency as there will be work performed on the general gfx + compute queue as opposed to only using the realtime async compute queue which can run in tandem with the game's gfx work.
+---
 
-Using Reshade effects is **highly discouraged** for doing simple transformations which can be achieved with LUTs/CTMs which are possible to do in the DC (Display Core) on AMDGPU at scanout time, or with the current regular async compute composite path.
-The looks system where you can specify your own 3D LUTs would be a better alternative for such transformations.
-
-Pull requests for improving Reshade compatibility support are appreciated.
-
-## Status of Gamescope Packages
+## Packaging status (upstream)
 
 [![Packaging status](https://repology.org/badge/vertical-allrepos/gamescope.svg?exclude_unsupported=1)](https://repology.org/project/gamescope/versions)
+
+Distro packages track **upstream** Valve gamescope; this fork must be built from source until changes are merged upstream.
+
+---
+
+## License and upstream
+
+gamescope is developed by Valve and contributors. This fork inherits the same license as upstream; see repository files for details. For the canonical project and issue tracker, see [ValveSoftware/gamescope](https://github.com/ValveSoftware/gamescope).
