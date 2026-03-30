@@ -883,7 +883,22 @@ int main(int argc, char **argv)
 	if ( eCurrentBackend == gamescope::GamescopeBackend::Auto )
 	{
 		if ( g_pOriginalWaylandDisplay != NULL )
-			eCurrentBackend = gamescope::GamescopeBackend::Wayland;
+		{
+			bool bNvidiaDriverLoaded = ( access( "/dev/nvidiactl", F_OK ) == 0 );
+#if HAVE_SDL2
+			if ( bNvidiaDriverLoaded )
+			{
+				fprintf( stderr, "NVIDIA driver detected: using SDL backend for nested Wayland mode\n"
+				         "(the Wayland backend's DMA-BUF sharing is incompatible with NVIDIA in hybrid/nested setups).\n"
+				         "Use --backend wayland to override.\n" );
+				eCurrentBackend = gamescope::GamescopeBackend::SDL;
+			}
+			else
+#endif
+			{
+				eCurrentBackend = gamescope::GamescopeBackend::Wayland;
+			}
+		}
 		else if ( g_pOriginalDisplay != NULL )
 			eCurrentBackend = gamescope::GamescopeBackend::SDL;
 		else

@@ -422,6 +422,7 @@ bool acquire_next_image( void );
 
 bool vulkan_primary_dev_id(dev_t *id);
 bool vulkan_supports_modifiers(void);
+bool vulkan_is_nvidia(void);
 
 gamescope::Rc<CVulkanTexture> vulkan_create_1d_lut(uint32_t size);
 gamescope::Rc<CVulkanTexture> vulkan_create_3d_lut(uint32_t width, uint32_t height, uint32_t depth);
@@ -752,6 +753,13 @@ struct VulkanTimelineSemaphore_t
 
 	CVulkanDevice *pDevice = nullptr;
 	VkSemaphore pVkSemaphore = VK_NULL_HANDLE;
+	bool bIsBinary = false;
+
+	// For NVIDIA SYNC_FD signal export: DRM syncobj to receive the sync file
+	// after a Vulkan submit signals this binary semaphore.
+	int32_t nDrmRenderFd = -1;
+	uint32_t uDrmSyncobjHandle = 0;
+	uint64_t ulDrmSyncobjPoint = 0;
 
 	int GetFd() const;
 };
@@ -786,6 +794,9 @@ public:
 	std::shared_ptr<VulkanTimelineSemaphore_t> CreateTimelineSemaphore( uint64_t ulStartingPoint, bool bShared = false );
 	std::shared_ptr<VulkanTimelineSemaphore_t> ImportTimelineSemaphore( gamescope::CTimeline *pTimeline );
 
+	std::shared_ptr<VulkanTimelineSemaphore_t> ImportSyncPointAsBinary( int32_t nDrmRenderFd, uint32_t uSyncobjHandle, uint64_t ulPoint );
+	std::shared_ptr<VulkanTimelineSemaphore_t> CreateExportableBinarySemaphore( int32_t nDrmRenderFd, uint32_t uSyncobjHandle, uint64_t ulPoint );
+
 	static const uint32_t upload_buffer_size = 1920 * 1080 * 4;
 
 	inline VkDevice device() { return m_device; }
@@ -804,6 +815,7 @@ public:
 	inline bool hasDrmPrimaryDevId() {return m_bHasDrmPrimaryDevId;}
 	inline dev_t primaryDevId() {return m_drmPrimaryDevId;}
 	inline bool supportsFp16() {return m_bSupportsFp16;}
+	inline bool isNvidiaDevice() {return m_bIsNvidia;}
 
 	inline std::pair<void *, uint32_t> uploadBufferData(uint32_t size)
 	{
@@ -868,6 +880,7 @@ protected:
 	bool m_bHasDrmPrimaryDevId = false;
 	bool m_bSupportsModifiers = false;
 	bool m_bInitialized = false;
+	bool m_bIsNvidia = false;
 
 
 	VkPhysicalDeviceMemoryProperties m_memoryProperties;

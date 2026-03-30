@@ -71,6 +71,7 @@ gamescope::ConVar<bool> cv_drm_debug_disable_color_encoding( "drm_debug_disable_
 gamescope::ConVar<bool> cv_drm_debug_disable_color_range( "drm_debug_disable_color_range", false, "YUV Color Range chicken bit. (Forces COLOR_RANGE to DEFAULT, does not affect other logic)" );
 gamescope::ConVar<bool> cv_drm_debug_disable_explicit_sync( "drm_debug_disable_explicit_sync", false, "Force disable explicit sync on the DRM backend." );
 gamescope::ConVar<bool> cv_drm_debug_disable_in_fence_fd( "drm_debug_disable_in_fence_fd", false, "Force disable IN_FENCE_FD being set to avoid over-synchronization on the DRM backend." );
+gamescope::ConVar<bool> cv_drm_nvidia_explicit_sync_via_sync_fd( "drm_nvidia_explicit_sync_via_sync_fd", false, "Enable explicit sync on NVIDIA via portable SYNC_FD binary semaphores." );
 
 gamescope::ConVar<bool> cv_drm_allow_dynamic_modes_for_external_display( "drm_allow_dynamic_modes_for_external_display", false, "Allow dynamic mode/refresh rate switching for external displays." );
 
@@ -1279,6 +1280,12 @@ bool init_drm(struct drm_t *drm, int width, int height, int refresh)
 		}
 	} else {
 		drm_log.errorf("Syncobjs are not supported by the KMS driver");
+	}
+
+	if ( vulkan_is_nvidia() && !cv_drm_debug_disable_in_fence_fd )
+	{
+		drm_log.infof( "NVIDIA proprietary driver: proactively disabling IN_FENCE_FD to avoid EPERM on atomic commits" );
+		cv_drm_debug_disable_in_fence_fd = true;
 	}
 
 	if (drmGetCap(drm->fd, DRM_CAP_ADDFB2_MODIFIERS, &cap) == 0 && cap != 0) {
@@ -3836,6 +3843,12 @@ namespace gamescope
 
 		virtual bool SupportsExplicitSync() const override
 		{
+			// NVIDIA proprietary driver does not support importing DRM syncobj
+			// FDs as Vulkan timeline semaphores via OPAQUE_FD. Disable explicit
+			// sync unless the user opts in to the portable SYNC_FD path.
+			if ( vulkan_is_nvidia() && !cv_drm_nvidia_explicit_sync_via_sync_fd )
+				return false;
+
 #if __linux__
 			auto [nMajor, nMinor, nPatch] = GetKernelVersion();
 			

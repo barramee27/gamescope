@@ -26,6 +26,32 @@ namespace gamescope
 
     /*static*/ std::shared_ptr<CTimeline> CTimeline::Create( const TimelineCreateDesc_t &desc )
     {
+        if ( g_device.isNvidiaDevice() )
+        {
+            uint32_t uHandle = 0;
+            if ( drmSyncobjCreate( g_device.drmRenderFd(), 0, &uHandle ) != 0 )
+            {
+                s_TimelineLog.errorf_errno( "CTimeline::Create (NVIDIA): drmSyncobjCreate failed" );
+                return nullptr;
+            }
+
+            int32_t nFd = -1;
+            if ( drmSyncobjHandleToFD( g_device.drmRenderFd(), uHandle, &nFd ) != 0 )
+            {
+                s_TimelineLog.errorf_errno( "CTimeline::Create (NVIDIA): drmSyncobjHandleToFD failed" );
+                drmSyncobjDestroy( g_device.drmRenderFd(), uHandle );
+                return nullptr;
+            }
+
+            if ( desc.ulStartingPoint > 0 )
+            {
+                uint64_t ulPoint = desc.ulStartingPoint;
+                drmSyncobjTimelineSignal( g_device.drmRenderFd(), &uHandle, &ulPoint, 1 );
+            }
+
+            return std::make_shared<CTimeline>( nFd, uHandle, nullptr );
+        }
+
         std::shared_ptr<VulkanTimelineSemaphore_t> pSemaphore = g_device.CreateTimelineSemaphore( desc.ulStartingPoint, true );
         if ( !pSemaphore )
             return nullptr;
@@ -66,6 +92,16 @@ namespace gamescope
             m_pVkSemaphore = g_device.ImportTimelineSemaphore( this );
 
         return m_pVkSemaphore;
+    }
+
+    std::shared_ptr<VulkanTimelineSemaphore_t> CTimeline::ImportPointAsBinary( uint64_t ulPoint )
+    {
+        return g_device.ImportSyncPointAsBinary( GetDrmRenderFD(), m_uSyncobjHandle, ulPoint );
+    }
+
+    std::shared_ptr<VulkanTimelineSemaphore_t> CTimeline::CreateSignalSemaphoreForPoint( uint64_t ulPoint )
+    {
+        return g_device.CreateExportableBinarySemaphore( GetDrmRenderFD(), m_uSyncobjHandle, ulPoint );
     }
 
     // CTimelinePoint

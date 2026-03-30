@@ -7176,8 +7176,21 @@ void update_wayland_res(CommitDoneList_t *doneCommits, steamcompmgr_win_t *w, Re
 
 				std::unique_ptr<CVulkanCmdBuffer> pCommandBuffer = g_device.commandBuffer();
 				
-				pCommandBuffer->AddDependency( reslistentry.pAcquirePoint->GetTimeline()->ToVkSemaphore(), reslistentry.pAcquirePoint->GetPoint() );
-				pCommandBuffer->AddSignal( pTempImage->pReleaseTimeline->ToVkSemaphore(), ulNextReleasePoint );
+				if ( g_device.isNvidiaDevice() )
+				{
+					auto pAcqSem = reslistentry.pAcquirePoint->GetTimeline()->ImportPointAsBinary( reslistentry.pAcquirePoint->GetPoint() );
+					if ( pAcqSem )
+						pCommandBuffer->AddDependency( std::move( pAcqSem ), 0 );
+
+					auto pRelSem = pTempImage->pReleaseTimeline->CreateSignalSemaphoreForPoint( ulNextReleasePoint );
+					if ( pRelSem )
+						pCommandBuffer->AddSignal( std::move( pRelSem ), 0 );
+				}
+				else
+				{
+					pCommandBuffer->AddDependency( reslistentry.pAcquirePoint->GetTimeline()->ToVkSemaphore(), reslistentry.pAcquirePoint->GetPoint() );
+					pCommandBuffer->AddSignal( pTempImage->pReleaseTimeline->ToVkSemaphore(), ulNextReleasePoint );
+				}
 
 				static std::optional<uint64_t> s_ulLastPreemptiveUpscaleSeqNo;
 

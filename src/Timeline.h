@@ -46,7 +46,10 @@ namespace gamescope
         uint32_t GetSyncobjHandle() const { return m_uSyncobjHandle; }
 
         std::shared_ptr<VulkanTimelineSemaphore_t> ToVkSemaphore();
-        
+
+        std::shared_ptr<VulkanTimelineSemaphore_t> ImportPointAsBinary( uint64_t ulPoint );
+        std::shared_ptr<VulkanTimelineSemaphore_t> CreateSignalSemaphoreForPoint( uint64_t ulPoint );
+
     private:
         int32_t m_nSyncobjFd = -1;
         uint32_t m_uSyncobjHandle = 0;

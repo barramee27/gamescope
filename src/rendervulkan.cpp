@@ -471,14 +471,22 @@ bool CVulkanDevice::createDevice()
 	// We need to refactor some Vulkan stuff to do that though.
 	if ( hasDrmProps )
 	{
+		VkPhysicalDeviceVulkan12Properties vulkan12Props = {
+			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES,
+		};
 		VkPhysicalDeviceDrmPropertiesEXT drmProps = {
 			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT,
+			.pNext = &vulkan12Props,
 		};
 		VkPhysicalDeviceProperties2 props2 = {
 			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
 			.pNext = &drmProps,
 		};
 		vk.GetPhysicalDeviceProperties2( physDev(), &props2 );
+
+		m_bIsNvidia = ( vulkan12Props.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY );
+		if ( m_bIsNvidia )
+			vk_log.infof( "NVIDIA proprietary driver detected, enabling compatibility workarounds" );
 
 		if ( !GetBackend()->UsesVulkanSwapchain() && !drmProps.hasPrimary ) {
 			vk_log.errorf( "physical device has no primary node" );
@@ -1304,13 +1312,13 @@ uint64_t CVulkanDevice::submitInternal( CVulkanCmdBuffer* cmdBuffer )
 	for ( auto &dep : cmdBuffer->GetExternalSignals() )
 	{
 		pSignalSemaphores.push_back( dep.pTimelineSemaphore->pVkSemaphore );
-		ulSignalPoints.push_back( dep.ulPoint );
+		ulSignalPoints.push_back( dep.pTimelineSemaphore->bIsBinary ? 0 : dep.ulPoint );
 	}
 
 	for ( auto &dep : cmdBuffer->GetExternalDependencies() )
 	{
 		pWaitSemaphores.push_back( dep.pTimelineSemaphore->pVkSemaphore );
-		ulWaitPoints.push_back( dep.ulPoint );
+		ulWaitPoints.push_back( dep.pTimelineSemaphore->bIsBinary ? 0 : dep.ulPoint );
 		uWaitStageFlags.push_back( VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT );
 	}
 
@@ -1338,6 +1346,55 @@ uint64_t CVulkanDevice::submitInternal( CVulkanCmdBuffer* cmdBuffer )
 	};
 
 	vk_check( vk.QueueSubmit( cmdBuffer->queue(), 1, &submitInfo, VK_NULL_HANDLE ) );
+
+#if HAVE_DRM
+	for ( auto &dep : cmdBuffer->GetExternalSignals() )
+	{
+		if ( !dep.pTimelineSemaphore->bIsBinary || !dep.pTimelineSemaphore->uDrmSyncobjHandle )
+			continue;
+
+		VkSemaphoreGetFdInfoKHR getFdInfo =
+		{
+			.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
+			.semaphore = dep.pTimelineSemaphore->pVkSemaphore,
+			.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
+		};
+
+		int32_t nSyncFileFd = -1;
+		VkResult res = vk.GetSemaphoreFdKHR( m_device, &getFdInfo, &nSyncFileFd );
+		if ( res != VK_SUCCESS )
+		{
+			vk_errorf( res, "submitInternal: SYNC_FD export failed" );
+			continue;
+		}
+
+		uint32_t uTempSyncobj = 0;
+		if ( drmSyncobjCreate( dep.pTimelineSemaphore->nDrmRenderFd, 0, &uTempSyncobj ) != 0 )
+		{
+			vk_log.errorf_errno( "submitInternal: drmSyncobjCreate failed" );
+			close( nSyncFileFd );
+			continue;
+		}
+
+		if ( drmSyncobjImportSyncFile( dep.pTimelineSemaphore->nDrmRenderFd, uTempSyncobj, nSyncFileFd ) != 0 )
+		{
+			vk_log.errorf_errno( "submitInternal: drmSyncobjImportSyncFile failed" );
+			close( nSyncFileFd );
+			drmSyncobjDestroy( dep.pTimelineSemaphore->nDrmRenderFd, uTempSyncobj );
+			continue;
+		}
+		close( nSyncFileFd );
+
+		if ( drmSyncobjTransfer( dep.pTimelineSemaphore->nDrmRenderFd,
+				dep.pTimelineSemaphore->uDrmSyncobjHandle, dep.pTimelineSemaphore->ulDrmSyncobjPoint,
+				uTempSyncobj, 0, 0 ) != 0 )
+		{
+			vk_log.errorf_errno( "submitInternal: drmSyncobjTransfer failed" );
+		}
+
+		drmSyncobjDestroy( dep.pTimelineSemaphore->nDrmRenderFd, uTempSyncobj );
+	}
+#endif
 
 	return nextSeqNo;
 }
@@ -1465,6 +1522,101 @@ std::shared_ptr<VulkanTimelineSemaphore_t> CVulkanDevice::ImportTimelineSemaphor
 	if ( ( res = vk.ImportSemaphoreFdKHR( m_device, &importFdInfo ) ) != VK_SUCCESS )
 	{
 		vk_errorf( res, "vkImportSemaphoreFdKHR failed" );
+		return nullptr;
+	}
+
+	return pSemaphore;
+}
+
+std::shared_ptr<VulkanTimelineSemaphore_t> CVulkanDevice::ImportSyncPointAsBinary( int32_t nDrmRenderFd, uint32_t uSyncobjHandle, uint64_t ulPoint )
+{
+#if HAVE_DRM
+	uint32_t uTempSyncobj = 0;
+	if ( drmSyncobjCreate( nDrmRenderFd, 0, &uTempSyncobj ) != 0 )
+	{
+		vk_log.errorf_errno( "ImportSyncPointAsBinary: drmSyncobjCreate failed" );
+		return nullptr;
+	}
+
+	if ( drmSyncobjTransfer( nDrmRenderFd, uTempSyncobj, 0, uSyncobjHandle, ulPoint, 0 ) != 0 )
+	{
+		vk_log.errorf_errno( "ImportSyncPointAsBinary: drmSyncobjTransfer failed" );
+		drmSyncobjDestroy( nDrmRenderFd, uTempSyncobj );
+		return nullptr;
+	}
+
+	int nSyncFileFd = -1;
+	if ( drmSyncobjExportSyncFile( nDrmRenderFd, uTempSyncobj, &nSyncFileFd ) != 0 )
+	{
+		vk_log.errorf_errno( "ImportSyncPointAsBinary: drmSyncobjExportSyncFile failed" );
+		drmSyncobjDestroy( nDrmRenderFd, uTempSyncobj );
+		return nullptr;
+	}
+	drmSyncobjDestroy( nDrmRenderFd, uTempSyncobj );
+
+	auto pSemaphore = std::make_shared<VulkanTimelineSemaphore_t>();
+	pSemaphore->pDevice = this;
+	pSemaphore->bIsBinary = true;
+
+	const VkSemaphoreCreateInfo createInfo =
+	{
+		.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+	};
+
+	VkResult res;
+	if ( ( res = vk.CreateSemaphore( m_device, &createInfo, nullptr, &pSemaphore->pVkSemaphore ) ) != VK_SUCCESS )
+	{
+		vk_errorf( res, "ImportSyncPointAsBinary: vkCreateSemaphore failed" );
+		close( nSyncFileFd );
+		return nullptr;
+	}
+
+	const VkImportSemaphoreFdInfoKHR importInfo =
+	{
+		.sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR,
+		.semaphore = pSemaphore->pVkSemaphore,
+		.flags = VK_SEMAPHORE_IMPORT_TEMPORARY_BIT,
+		.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
+		.fd = nSyncFileFd,
+	};
+
+	if ( ( res = vk.ImportSemaphoreFdKHR( m_device, &importInfo ) ) != VK_SUCCESS )
+	{
+		vk_errorf( res, "ImportSyncPointAsBinary: vkImportSemaphoreFdKHR SYNC_FD failed" );
+		return nullptr;
+	}
+
+	return pSemaphore;
+#else
+	return nullptr;
+#endif
+}
+
+std::shared_ptr<VulkanTimelineSemaphore_t> CVulkanDevice::CreateExportableBinarySemaphore( int32_t nDrmRenderFd, uint32_t uSyncobjHandle, uint64_t ulPoint )
+{
+	auto pSemaphore = std::make_shared<VulkanTimelineSemaphore_t>();
+	pSemaphore->pDevice = this;
+	pSemaphore->bIsBinary = true;
+	pSemaphore->nDrmRenderFd = nDrmRenderFd;
+	pSemaphore->uDrmSyncobjHandle = uSyncobjHandle;
+	pSemaphore->ulDrmSyncobjPoint = ulPoint;
+
+	const VkExportSemaphoreCreateInfo exportInfo =
+	{
+		.sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
+		.handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
+	};
+
+	const VkSemaphoreCreateInfo createInfo =
+	{
+		.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+		.pNext = &exportInfo,
+	};
+
+	VkResult res;
+	if ( ( res = vk.CreateSemaphore( m_device, &createInfo, nullptr, &pSemaphore->pVkSemaphore ) ) != VK_SUCCESS )
+	{
+		vk_errorf( res, "CreateExportableBinarySemaphore: vkCreateSemaphore failed" );
 		return nullptr;
 	}
 
@@ -2273,7 +2425,7 @@ bool CVulkanTexture::BInit( uint32_t width, uint32_t height, uint32_t depth, uin
 		VkMemoryDedicatedAllocateInfo memory_dedicated_info = {};
 		struct wsi_memory_allocate_info memory_wsi_info = {};
 
-		if ( flags.bFlippable == true )
+		if ( flags.bFlippable == true && !g_device.isNvidiaDevice() )
 		{
 			memory_wsi_info = {
 				.sType = VK_STRUCTURE_TYPE_WSI_MEMORY_ALLOCATE_INFO_MESA,
@@ -4222,6 +4374,11 @@ bool vulkan_primary_dev_id(dev_t *id)
 bool vulkan_supports_modifiers(void)
 {
 	return g_device.supportsModifiers();
+}
+
+bool vulkan_is_nvidia(void)
+{
+	return g_device.isNvidiaDevice();
 }
 
 static void texture_destroy( struct wlr_texture *wlr_texture )

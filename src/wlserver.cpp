@@ -2022,6 +2022,10 @@ bool wlserver_init( void ) {
 		create_explicit_sync();
 		wl_log.infof( "Using explicit sync when available" );
 	}
+	else
+	{
+		wl_log.infof( "Explicit sync not available, using implicit sync" );
+	}
 
 	wlserver.relative_pointer_manager = wlr_relative_pointer_manager_v1_create(wlserver.display);
 	if ( !wlserver.relative_pointer_manager )

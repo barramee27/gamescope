@@ -12,6 +12,7 @@
 #include "Utils/TempFiles.h"
 
 #include <cstring>
+#include <cinttypes>
 #include <unordered_map>
 #include <unordered_set>
 #include <csignal>
@@ -2204,6 +2205,19 @@ namespace gamescope
 
     OwningRc<IBackendFb> CWaylandBackend::ImportDmabufToBackend( wlr_dmabuf_attributes *pDmaBuf )
     {
+        auto iter = m_FormatModifiers.find( pDmaBuf->format );
+        if ( iter != m_FormatModifiers.end() )
+        {
+            if ( !Algorithm::Contains( iter->second, pDmaBuf->modifier ) &&
+                 !Algorithm::Contains( iter->second, (uint64_t)DRM_FORMAT_MOD_INVALID ) )
+            {
+                xdg_log.errorf( "DMA-BUF modifier 0x%" PRIx64 " for format 0x%x is not supported by the parent compositor. "
+                    "This typically happens on hybrid GPU systems (e.g. NVIDIA dGPU + iGPU). "
+                    "Try using --backend sdl instead.", pDmaBuf->modifier, pDmaBuf->format );
+                return nullptr;
+            }
+        }
+
         zwp_linux_buffer_params_v1 *pBufferParams = zwp_linux_dmabuf_v1_create_params( m_pLinuxDmabuf );
         if ( !pBufferParams )
         {
@@ -2292,7 +2306,7 @@ namespace gamescope
 
     bool CWaylandBackend::SupportsExplicitSync() const
     {
-        return true;
+        return !vulkan_is_nvidia();
     }
 
     bool CWaylandBackend::IsPaused() const
