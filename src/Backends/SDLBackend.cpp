@@ -198,6 +198,9 @@ namespace gamescope
 		std::atomic<SDLInitState> m_eSDLInit = { SDLInitState::SDLInit_Waiting };
 
 		std::atomic<bool> m_bApplicationGrabbed = { false };
+		// SDL often emits a bogus SDL_MOUSEMOTION (e.g. 0,0) right after leaving relative mode;
+		// suppress a couple of absolute motions after recentering so UI cursors don't jump to the corner.
+		uint8_t m_uSuppressAbsoluteMouseMotionAfterRelative = 0;
 		std::atomic<bool> m_bApplicationVisible = { false };
 		std::atomic<std::shared_ptr<INestedHints::CursorInfo>> m_pApplicationCursor;
 		std::atomic<std::shared_ptr<std::string>> m_pApplicationTitle;
@@ -675,6 +678,11 @@ namespace gamescope
 					}
 					else
 					{
+						if ( m_uSuppressAbsoluteMouseMotionAfterRelative > 0 )
+						{
+							m_uSuppressAbsoluteMouseMotionAfterRelative--;
+							break;
+						}
 						wlserver_lock();
 						wlserver_touchmotion(
 							event.motion.x / float(g_nOutputWidthPts),
@@ -924,7 +932,29 @@ namespace gamescope
 					}
 					else if ( event.type == GetUserEventIndex( GAMESCOPE_SDL_EVENT_GRAB ) )
 					{
-						SDL_SetRelativeMouseMode( m_bApplicationGrabbed ? SDL_TRUE : SDL_FALSE );
+						if ( m_bApplicationGrabbed )
+						{
+							m_uSuppressAbsoluteMouseMotionAfterRelative = 0;
+							SDL_SetRelativeMouseMode( SDL_TRUE );
+						}
+						else
+						{
+							SDL_SetRelativeMouseMode( SDL_FALSE );
+							// Recenter host cursor and drop the next spurious absolute motion(s) from SDL
+							// (fixes jump to top-left when games leave relative mode for UI/map screens).
+							if ( g_nOutputWidthPts > 0 && g_nOutputHeightPts > 0 )
+							{
+								SDL_WarpMouseInWindow(
+									m_Connector.GetSDLWindow(),
+									g_nOutputWidthPts / 2,
+									g_nOutputHeightPts / 2 );
+							}
+							m_uSuppressAbsoluteMouseMotionAfterRelative = 2;
+							// Warp + mode switch can queue bogus motions; still sync compositor to center.
+							wlserver_lock();
+							wlserver_touchmotion( 0.5f, 0.5f, 0, fake_timestamp );
+							wlserver_unlock();
+						}
 					}
 					else if ( event.type == GetUserEventIndex( GAMESCOPE_SDL_EVENT_CURSOR ) )
 					{
