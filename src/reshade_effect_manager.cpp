@@ -910,7 +910,8 @@ ReshadeEffectPipeline::ReshadeEffectPipeline()
 
 ReshadeEffectPipeline::~ReshadeEffectPipeline()
 {
-    m_device->waitIdle();
+    if ( !m_device->waitIdle() )
+        m_device->vk.DeviceWaitIdle( m_device->device() );
 
     for (auto& pipeline : m_pipelines)
         m_device->vk.DestroyPipeline(m_device->device(), pipeline, nullptr);
@@ -1212,7 +1213,8 @@ bool ReshadeEffectPipeline::init(CVulkanDevice *device, const ReshadeEffectKey &
                 m_cmdBuffer->begin();
                 m_cmdBuffer->copyBufferToImage(scratchBuffer, 0, 0, texture);
                 device->submitInternal(&*m_cmdBuffer);
-                device->waitIdle(false);
+                if ( !device->waitIdle(false) )
+                    device->vk.DeviceWaitIdle( device->device() );
 
                 free(data);
                 device->vk.DestroyBuffer(device->device(), scratchBuffer, nullptr);
@@ -1237,7 +1239,8 @@ bool ReshadeEffectPipeline::init(CVulkanDevice *device, const ReshadeEffectKey &
             device->vk.CmdClearColorImage(m_cmdBuffer->rawBuffer(), texture->vkImage(), VK_IMAGE_LAYOUT_GENERAL, &clearColor, 1, &range);
             m_cmdBuffer->markDirty(texture.get());
             device->submitInternal(&*m_cmdBuffer);
-            device->waitIdle(false);
+            if ( !device->waitIdle(false) )
+                device->vk.DeviceWaitIdle( device->device() );
         }
 
         m_textures.emplace_back(std::move(texture));

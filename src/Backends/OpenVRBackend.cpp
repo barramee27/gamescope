@@ -1603,7 +1603,11 @@ namespace gamescope
                 return -EINVAL;
             }
 
-            vulkan_wait( *oCompositeResult, true );
+            if ( !vulkan_wait( *oCompositeResult, true ) )
+            {
+                openvr_log.errorf( "vulkan_wait failed after composite" );
+                return -EINVAL;
+            }
 
             FrameInfo_t::Layer_t compositeLayer{};
             compositeLayer.scale.x = 1.0;

@@ -14,6 +14,7 @@
 #include "gamescope_shared.h"
 #include "main.hpp"
 #include "wlserver.hpp"
+#include "convar.h"
 #include <SDL.h>
 #include <SDL_vulkan.h>
 #include "rendervulkan.hpp"
@@ -34,6 +35,9 @@ extern bool steamMode;
 extern bool g_bFirstFrame;
 extern int g_nPreferredOutputWidth;
 extern int g_nPreferredOutputHeight;
+
+gamescope::ConVar<bool> cv_sdl_nvidia_explicit_sync( "sdl_nvidia_explicit_sync", false, "Allow SDL backend to advertise explicit sync on NVIDIA. Disabled by default for safer cross-client behavior." );
+gamescope::ConVar<bool> cv_sdl_debug_input_events( "sdl_debug_input_events", false, "Log SDL input/grab/focus transitions for debugging nested input issues." );
 
 namespace gamescope
 {
@@ -351,7 +355,11 @@ namespace gamescope
 
 		// Wait for the composite result on our side *after* we
 		// commit the buffer to the compositor to avoid a bubble.
-		vulkan_wait( *oCompositeResult, true );
+		if ( !vulkan_wait( *oCompositeResult, true ) )
+		{
+			fprintf( stderr, "gamescope SDL: vulkan_wait failed after composite\n" );
+			return -EIO;
+		}
 
 		GetVBlankTimer().UpdateWasCompositing( true );
 		GetVBlankTimer().UpdateLastDrawTime( get_time_in_nanos() - g_SteamCompMgrVBlankTime.ulWakeupTime );
@@ -498,8 +506,11 @@ namespace gamescope
 
 	bool CSDLBackend::SupportsExplicitSync() const
 	{
-		// We use a Vulkan swapchain, so yes.
-		return true;
+	if ( vulkan_is_nvidia() )
+		return cv_sdl_nvidia_explicit_sync;
+
+	// We use a Vulkan swapchain, so yes.
+	return true;
 	}
 
 	bool CSDLBackend::IsPaused() const
@@ -668,6 +679,15 @@ namespace gamescope
 					{
 						if ( g_bWindowFocused )
 						{
+							if ( cv_sdl_debug_input_events )
+							{
+								static uint32_t s_uRelativeMotionLogThrottle = 0;
+								if ( ( s_uRelativeMotionLogThrottle++ % 240 ) == 0 )
+								{
+									fprintf( stderr, "SDL input: relative motion xrel=%d yrel=%d focused=%d grabbed=%d\n",
+										event.motion.xrel, event.motion.yrel, g_bWindowFocused ? 1 : 0, m_bApplicationGrabbed.load() ? 1 : 0 );
+								}
+							}
 							wlserver_lock();
 							wlserver_mousemotion( event.motion.xrel, event.motion.yrel, fake_timestamp );
 							wlserver_unlock();
@@ -675,6 +695,16 @@ namespace gamescope
 					}
 					else
 					{
+						if ( cv_sdl_debug_input_events )
+						{
+							static uint32_t s_uAbsoluteMotionLogThrottle = 0;
+							if ( ( s_uAbsoluteMotionLogThrottle++ % 240 ) == 0 )
+							{
+								fprintf( stderr, "SDL input: absolute motion x=%d y=%d outputPts=%dx%d focused=%d grabbed=%d\n",
+									event.motion.x, event.motion.y, g_nOutputWidthPts, g_nOutputHeightPts,
+									g_bWindowFocused ? 1 : 0, m_bApplicationGrabbed.load() ? 1 : 0 );
+							}
+						}
 						wlserver_lock();
 						wlserver_touchmotion(
 							event.motion.x / float(g_nOutputWidthPts),
@@ -846,10 +876,14 @@ namespace gamescope
 						case SDL_WINDOWEVENT_FOCUS_LOST:
 							g_nNestedRefresh = g_nNestedUnfocusedRefresh;
 							g_bWindowFocused = false;
+							if ( cv_sdl_debug_input_events )
+								fprintf( stderr, "SDL input: focus lost (grabbed=%d)\n", m_bApplicationGrabbed.load() ? 1 : 0 );
 							break;
 						case SDL_WINDOWEVENT_FOCUS_GAINED:
 							g_nNestedRefresh = g_nOldNestedRefresh;
 							g_bWindowFocused = true;
+							if ( cv_sdl_debug_input_events )
+								fprintf( stderr, "SDL input: focus gained (grabbed=%d)\n", m_bApplicationGrabbed.load() ? 1 : 0 );
 							break;
 						case SDL_WINDOWEVENT_EXPOSED:
 							force_repaint();
@@ -924,6 +958,14 @@ namespace gamescope
 					}
 					else if ( event.type == GetUserEventIndex( GAMESCOPE_SDL_EVENT_GRAB ) )
 					{
+						if ( cv_sdl_debug_input_events )
+						{
+							fprintf( stderr, "SDL input: SetRelativeMouseMode(%d) focused=%d outputPts=%dx%d outputPx=%dx%d\n",
+								m_bApplicationGrabbed.load() ? 1 : 0,
+								g_bWindowFocused ? 1 : 0,
+								g_nOutputWidthPts, g_nOutputHeightPts,
+								g_nOutputWidth, g_nOutputHeight );
+						}
 						SDL_SetRelativeMouseMode( m_bApplicationGrabbed ? SDL_TRUE : SDL_FALSE );
 					}
 					else if ( event.type == GetUserEventIndex( GAMESCOPE_SDL_EVENT_CURSOR ) )

@@ -1119,7 +1119,11 @@ namespace gamescope
                     return -EINVAL;
                 }
 
-                vulkan_wait( *oCompositeResult, true );
+                if ( !vulkan_wait( *oCompositeResult, true ) )
+                {
+                    xdg_log.errorf( "vulkan_wait failed after composite" );
+                    return -EINVAL;
+                }
 
                 FrameInfo_t::Layer_t compositeLayer{};
                 compositeLayer.scale.x = 1.0;
@@ -2221,7 +2225,8 @@ namespace gamescope
         zwp_linux_buffer_params_v1 *pBufferParams = zwp_linux_dmabuf_v1_create_params( m_pLinuxDmabuf );
         if ( !pBufferParams )
         {
-            xdg_log.errorf( "Failed to create imported dmabuf params" );
+            xdg_log.errorf( "Failed to create imported dmabuf params (format=0x%x modifier=0x%" PRIx64 " size=%dx%d planes=%d)",
+                pDmaBuf->format, pDmaBuf->modifier, pDmaBuf->width, pDmaBuf->height, pDmaBuf->n_planes );
             return nullptr;
         }
 
@@ -2246,7 +2251,8 @@ namespace gamescope
 
         if ( !pImportedBuffer )
         {
-            xdg_log.errorf( "Failed to import dmabuf" );
+            xdg_log.errorf( "Failed to import dmabuf (create_immed) format=0x%x modifier=0x%" PRIx64 " size=%dx%d planes=%d",
+                pDmaBuf->format, pDmaBuf->modifier, pDmaBuf->width, pDmaBuf->height, pDmaBuf->n_planes );
             return nullptr;
         }
 
@@ -2306,6 +2312,9 @@ namespace gamescope
 
     bool CWaylandBackend::SupportsExplicitSync() const
     {
+        // NVIDIA: always false here; enabling would require wp_linux_drm_syncobj (or
+        // equivalent) to the parent compositor plus modifier/import validation—not a
+        // one-line change. See project NVIDIA hardening notes / issue tracker.
         return !vulkan_is_nvidia();
     }
 

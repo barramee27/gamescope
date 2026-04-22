@@ -1284,9 +1284,22 @@ bool init_drm(struct drm_t *drm, int width, int height, int refresh)
 
 	if ( vulkan_is_nvidia() && !cv_drm_debug_disable_in_fence_fd )
 	{
-		drm_log.infof( "NVIDIA proprietary driver: proactively disabling IN_FENCE_FD to avoid EPERM on atomic commits" );
+		drm_log.infof( "NVIDIA proprietary driver: proactively disabling IN_FENCE_FD to avoid EPERM on atomic commits (explicit_sync_optin=%d)",
+			(bool)cv_drm_nvidia_explicit_sync_via_sync_fd ? 1 : 0 );
 		cv_drm_debug_disable_in_fence_fd = true;
 	}
+
+	/*
+	 * NVIDIA KMS: IN_FENCE_FD vs drm_nvidia_explicit_sync_via_sync_fd
+	 *
+	 * Plane IN_FENCE_FD (drm_prepare_liftoff) is forced off above for proprietary
+	 * NVIDIA because atomic commits can return EPERM (fallback in drm_prepare_liftoff).
+	 * Opt-in explicit sync (drm_nvidia_explicit_sync_via_sync_fd) only affects
+	 * SupportsExplicitSync() and the Vulkan SYNC_FD <-> DRM syncobj bridge used for
+	 * client buffer timelines; it does not re-enable plane IN_FENCE. Those paths are
+	 * intentionally independent—do not toggle IN_FENCE back on for NVIDIA without
+	 * confirmed KMS support on the target driver branch.
+	 */
 
 	if (drmGetCap(drm->fd, DRM_CAP_ADDFB2_MODIFIERS, &cap) == 0 && cap != 0) {
 		drm->allow_modifiers = true;
@@ -2788,6 +2801,11 @@ drm_prepare_liftoff( struct drm_t *drm, const struct FrameInfo_t *frameInfo, boo
 		{
 			// IN_FENCE_FD isn't actually supported. Avoid it in the future.
 			cv_drm_debug_disable_in_fence_fd  = true;
+			drm_log.errorf( "Atomic commit returned EPERM with IN_FENCE_FD; permanently disabling IN_FENCE_FD for this session." );
+		}
+		else
+		{
+			drm_log.errorf( "Atomic commit still failed after IN_FENCE_FD fallback (ret=%d).", ret );
 		}
 	}
 
@@ -3617,7 +3635,11 @@ namespace gamescope
 				return -EINVAL;
 			}
 
-			vulkan_wait( *oCompositeResult, true );
+			if ( !vulkan_wait( *oCompositeResult, true ) )
+			{
+				xwm_log.errorf( "vulkan_wait failed after composite" );
+				return -EINVAL;
+			}
 
 			FrameInfo_t presentCompFrameInfo = {};
 			presentCompFrameInfo.allowVRR = pFrameInfo->allowVRR;

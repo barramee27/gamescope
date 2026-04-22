@@ -2020,11 +2020,15 @@ bool wlserver_init( void ) {
 	if ( GetBackend()->SupportsExplicitSync() )
 	{
 		create_explicit_sync();
-		wl_log.infof( "Using explicit sync when available" );
+		wl_log.infof( "Using explicit sync when available (backend sessionBased=%d, nvidia=%d)",
+			GetBackend()->IsSessionBased() ? 1 : 0,
+			vulkan_is_nvidia() ? 1 : 0 );
 	}
 	else
 	{
-		wl_log.infof( "Explicit sync not available, using implicit sync" );
+		wl_log.infof( "Explicit sync not available, using implicit sync (backend sessionBased=%d, nvidia=%d)",
+			GetBackend()->IsSessionBased() ? 1 : 0,
+			vulkan_is_nvidia() ? 1 : 0 );
 	}
 
 	wlserver.relative_pointer_manager = wlr_relative_pointer_manager_v1_create(wlserver.display);

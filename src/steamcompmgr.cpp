@@ -53,6 +53,7 @@
 #include <filesystem>
 #include <variant>
 #include <unordered_set>
+#include <chrono>
 
 #include <assert.h>
 #include <stdlib.h>
@@ -294,6 +295,28 @@ gamescope::ConVar<int> cv_adaptive_sync_overlay_cycles( "adaptive_sync_overlay_c
 
 gamescope::ConVar<bool> cv_upscale_preemptive( "upscale_preemptive", true, "Allow pre-emptive upscaling" );
 gamescope::ConVar<bool> cv_upscale_preemptive_debug_force_sync( "upscale_preemptive_debug_force_sync", false, "Force synchronize pre-emptive upscaling" );
+gamescope::ConVar<uint32_t> cv_upscale_preemptive_nvidia_fail_log_ms( "upscale_preemptive_nvidia_fail_log_ms", 5000, "Minimum milliseconds between NVIDIA preemptive upscale sync-failure logs (0 = log every failure)." );
+static std::atomic<uint64_t> s_ulNvidiaPreemptiveSyncFailCount{};
+
+static void LogNvidiaPreemptiveSyncFailure( uint64_t ulAcquirePoint, bool bAcquireImportFailed, bool bReleaseCreateFailed )
+{
+	const uint64_t ulTotal = ++s_ulNvidiaPreemptiveSyncFailCount;
+	static std::chrono::steady_clock::time_point s_lastLog{};
+	const auto now = std::chrono::steady_clock::now();
+	const uint32_t uMinMs = cv_upscale_preemptive_nvidia_fail_log_ms;
+	if ( uMinMs > 0u && ulTotal > 1ull )
+	{
+		if ( now - s_lastLog < std::chrono::milliseconds( uMinMs ) )
+			return;
+	}
+	s_lastLog = now;
+	xwm_log.errorf(
+		"NVIDIA preemptive upscale: SYNC_FD binary semaphore path failed (acquire_import=%s signal_sem=%s point=%llu total_failures=%llu)",
+		bAcquireImportFailed ? "fail" : "ok",
+		bReleaseCreateFailed ? "fail" : "ok",
+		(unsigned long long) ulAcquirePoint,
+		(unsigned long long) ulTotal );
+}
 
 uint64_t g_SteamCompMgrLimitedAppRefreshCycle = 16'666'666;
 uint64_t g_SteamCompMgrAppRefreshCycle = 16'666'666;
@@ -2407,7 +2430,11 @@ static void paint_pipewire()
 
 	if ( oPipewireSequence )
 	{
-		vulkan_wait( *oPipewireSequence, true );
+		if ( !vulkan_wait( *oPipewireSequence, true ) )
+		{
+			xwm_log.errorf( "pipewire: vulkan_wait failed after capture; skipping push_pipewire_buffer" );
+			return;
+		}
 
 		push_pipewire_buffer( s_pPipewireBuffer );
 		s_pPipewireBuffer = nullptr;
@@ -2915,7 +2942,11 @@ paint_all( global_focus_t *pFocus, bool async )
 				return;
 			}
 
-			vulkan_wait( *oScreenshotSeq, false );
+			if ( !vulkan_wait( *oScreenshotSeq, false ) )
+			{
+				xwm_log.errorf( "screenshot: vulkan_wait failed; aborting readback" );
+				return;
+			}
 
 			uint16_t maxCLLNits = 0;
 			uint16_t maxFALLNits = 0;
@@ -7181,9 +7212,12 @@ void update_wayland_res(CommitDoneList_t *doneCommits, steamcompmgr_win_t *w, Re
 				{
 					auto pAcqSem = reslistentry.pAcquirePoint->GetTimeline()->ImportPointAsBinary( reslistentry.pAcquirePoint->GetPoint() );
 					auto pRelSem = pTempImage->pReleaseTimeline->CreateSignalSemaphoreForPoint( ulNextReleasePoint );
-					if ( !pAcqSem || !pRelSem )
+					const bool bAcqFail = !pAcqSem;
+					const bool bRelFail = !pRelSem;
+					if ( bAcqFail || bRelFail )
 					{
 						bNvidiaSyncFailed = true;
+						LogNvidiaPreemptiveSyncFailure( reslistentry.pAcquirePoint->GetPoint(), bAcqFail, bRelFail );
 					}
 					else
 					{
@@ -7203,14 +7237,16 @@ void update_wayland_res(CommitDoneList_t *doneCommits, steamcompmgr_win_t *w, Re
 
 					if ( s_ulLastPreemptiveUpscaleSeqNo )
 					{
-						vulkan_wait( *s_ulLastPreemptiveUpscaleSeqNo, true );
+						if ( !vulkan_wait( *s_ulLastPreemptiveUpscaleSeqNo, true ) )
+							xwm_log.errorf( "preemptive upscale: vulkan_wait failed for previous sequence" );
 					}
 
 					std::optional<uint64_t> seqNo = vulkan_composite( &upscaledFrameInfo, nullptr, false, pTempImage->pTexture, false, std::move( pCommandBuffer ) );
 
 					if ( seqNo && cv_upscale_preemptive_debug_force_sync )
 					{
-						vulkan_wait( *seqNo, true );
+						if ( !vulkan_wait( *seqNo, true ) )
+							xwm_log.errorf( "preemptive upscale: vulkan_wait failed (debug_force_sync)" );
 					}
 
 					s_ulLastPreemptiveUpscaleSeqNo = seqNo;

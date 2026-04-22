@@ -409,7 +409,8 @@ gamescope::OwningRc<CVulkanTexture> vulkan_create_texture_from_bits( uint32_t wi
 gamescope::OwningRc<CVulkanTexture> vulkan_create_texture_from_wlr_buffer( struct wlr_buffer *buf, gamescope::OwningRc<gamescope::IBackendFb> pBackendFb );
 
 std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamescope::Rc<CVulkanTexture> pScreenshotTexture, bool partial, gamescope::Rc<CVulkanTexture> pOutputOverride = nullptr, bool increment = true, std::unique_ptr<CVulkanCmdBuffer> pInCommandBuffer = nullptr );
-void vulkan_wait( uint64_t ulSeqNo, bool bReset );
+/** Returns true if the GPU reached ulSeqNo (and reset ran when requested). False on timeout/error; callers must not assume subsequent GPU reads are safe. */
+bool vulkan_wait( uint64_t ulSeqNo, bool bReset );
 gamescope::Rc<CVulkanTexture> vulkan_get_last_output_image( bool partial, bool defer );
 gamescope::Rc<CVulkanTexture> vulkan_acquire_screenshot_texture(uint32_t width, uint32_t height, bool exportable, uint32_t drmFormat, EStreamColorspace colorspace = k_EStreamColorspace_Unknown);
 
@@ -423,6 +424,8 @@ bool acquire_next_image( void );
 bool vulkan_primary_dev_id(dev_t *id);
 bool vulkan_supports_modifiers(void);
 bool vulkan_is_nvidia(void);
+/** Human-readable Vulkan device + driver version (NVIDIA decoded per vendor scheme). Valid after vulkan_make_output. */
+const char *vulkan_get_driver_version_summary(void);
 
 gamescope::Rc<CVulkanTexture> vulkan_create_1d_lut(uint32_t size);
 gamescope::Rc<CVulkanTexture> vulkan_create_3d_lut(uint32_t width, uint32_t height, uint32_t depth);
@@ -715,6 +718,7 @@ static inline uint32_t div_roundup(uint32_t x, uint32_t y)
 	VK_FUNC(DestroyPipelineLayout) \
 	VK_FUNC(DestroySampler) \
 	VK_FUNC(DestroySwapchainKHR) \
+	VK_FUNC(DeviceWaitIdle) \
 	VK_FUNC(EndCommandBuffer) \
 	VK_FUNC(FreeCommandBuffers) \
 	VK_FUNC(FreeDescriptorSets) \
@@ -781,8 +785,9 @@ public:
 	std::unique_ptr<CVulkanCmdBuffer> commandBuffer();
 	uint64_t submit( std::unique_ptr<CVulkanCmdBuffer> cmdBuf);
 	uint64_t submitInternal( CVulkanCmdBuffer* cmdBuf );
-	void wait(uint64_t sequence, bool reset = true);
-	void waitIdle(bool reset = true);
+	/** Waits for submission sequence; on failure (timeout or error) does not reset command buffers. Returns false if wait did not complete. */
+	bool wait(uint64_t sequence, bool reset = true);
+	bool waitIdle(bool reset = true);
 	void garbageCollect();
 	inline VkDescriptorSet descriptorSet()
 	{
@@ -825,7 +830,8 @@ public:
 		if (m_uploadBufferOffset + size > upload_buffer_size)
 		{
 			fprintf(stderr, "Exceeded uploadBufferData\n");
-			waitIdle(false);
+			if ( !waitIdle(false) )
+				vk.DeviceWaitIdle(device());
 		}
 
 		uint32_t uOffset = m_uploadBufferOffset;
@@ -1007,6 +1013,6 @@ gamescope::OwningRc<CVulkanTexture> vulkan_create_flat_texture( uint32_t width, 
 
 bool vulkan_supports_hdr10();
 
-void vulkan_wait_idle();
+bool vulkan_wait_idle();
 
 extern CVulkanDevice g_device;

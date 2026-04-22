@@ -123,6 +123,8 @@ VulkanOutput_t g_output;
 
 uint32_t g_uCompositeDebug = 0u;
 gamescope::ConVar<uint32_t> cv_composite_debug{ "composite_debug", 0, "Debug composition flags" };
+gamescope::ConVar<uint32_t> cv_vulkan_wait_timeout_ms{ "vulkan_wait_timeout_ms", 15000, "Timeout for vulkan_wait/CVulkanDevice::wait in milliseconds. Set to 0 for infinite wait." };
+gamescope::ConVar<bool> cv_vulkan_nvidia_sync_bridge_fallback_signal{ "vulkan_nvidia_sync_bridge_fallback_signal", true, "When NVIDIA SYNC_FD -> DRM timeline bridging fails, force-signal the DRM timeline point to avoid indefinite waits." };
 
 static std::map< VkFormat, std::map< uint64_t, VkDrmFormatModifierPropertiesEXT > > DRMModifierProps = {};
 static std::unordered_map<uint32_t, std::vector<uint64_t>> s_SampledModifierFormats = {};
@@ -1348,6 +1350,32 @@ uint64_t CVulkanDevice::submitInternal( CVulkanCmdBuffer* cmdBuffer )
 	vk_check( vk.QueueSubmit( cmdBuffer->queue(), 1, &submitInfo, VK_NULL_HANDLE ) );
 
 #if HAVE_DRM
+	auto signalFailedNvidiaBridgePoint = [&]( const VulkanTimelinePoint_t &dep, const char *pszStep )
+	{
+		vk_log.errorf( "submitInternal: %s failed for DRM syncobj 0x%x point %llu",
+			pszStep,
+			dep.pTimelineSemaphore->uDrmSyncobjHandle,
+			(unsigned long long)dep.pTimelineSemaphore->ulDrmSyncobjPoint );
+
+		if ( !cv_vulkan_nvidia_sync_bridge_fallback_signal )
+			return;
+
+		uint32_t uHandle = dep.pTimelineSemaphore->uDrmSyncobjHandle;
+		uint64_t ulPoint = dep.pTimelineSemaphore->ulDrmSyncobjPoint;
+		if ( drmSyncobjTimelineSignal( dep.pTimelineSemaphore->nDrmRenderFd, &uHandle, &ulPoint, 1 ) != 0 )
+		{
+			vk_log.errorf_errno( "submitInternal: fallback drmSyncobjTimelineSignal failed (syncobj 0x%x point %llu)",
+				uHandle,
+				(unsigned long long)ulPoint );
+			return;
+		}
+
+		vk_log.errorf( "submitInternal: fallback signaled DRM syncobj 0x%x point %llu after %s failure",
+			uHandle,
+			(unsigned long long)ulPoint,
+			pszStep );
+	};
+
 	for ( auto &dep : cmdBuffer->GetExternalSignals() )
 	{
 		if ( !dep.pTimelineSemaphore->bIsBinary || !dep.pTimelineSemaphore->uDrmSyncobjHandle )
@@ -1364,7 +1392,10 @@ uint64_t CVulkanDevice::submitInternal( CVulkanCmdBuffer* cmdBuffer )
 		VkResult res = vk.GetSemaphoreFdKHR( m_device, &getFdInfo, &nSyncFileFd );
 		if ( res != VK_SUCCESS )
 		{
-			vk_errorf( res, "submitInternal: SYNC_FD export failed" );
+			vk_errorf( res, "submitInternal: SYNC_FD export failed (syncobj 0x%x point %llu)",
+				dep.pTimelineSemaphore->uDrmSyncobjHandle,
+				(unsigned long long)dep.pTimelineSemaphore->ulDrmSyncobjPoint );
+			signalFailedNvidiaBridgePoint( dep, "SYNC_FD export" );
 			continue;
 		}
 
@@ -1373,6 +1404,7 @@ uint64_t CVulkanDevice::submitInternal( CVulkanCmdBuffer* cmdBuffer )
 		{
 			vk_log.errorf_errno( "submitInternal: drmSyncobjCreate failed" );
 			close( nSyncFileFd );
+			signalFailedNvidiaBridgePoint( dep, "drmSyncobjCreate" );
 			continue;
 		}
 
@@ -1381,6 +1413,7 @@ uint64_t CVulkanDevice::submitInternal( CVulkanCmdBuffer* cmdBuffer )
 			vk_log.errorf_errno( "submitInternal: drmSyncobjImportSyncFile failed" );
 			close( nSyncFileFd );
 			drmSyncobjDestroy( dep.pTimelineSemaphore->nDrmRenderFd, uTempSyncobj );
+			signalFailedNvidiaBridgePoint( dep, "drmSyncobjImportSyncFile" );
 			continue;
 		}
 		close( nSyncFileFd );
@@ -1390,6 +1423,7 @@ uint64_t CVulkanDevice::submitInternal( CVulkanCmdBuffer* cmdBuffer )
 				uTempSyncobj, 0, 0 ) != 0 )
 		{
 			vk_log.errorf_errno( "submitInternal: drmSyncobjTransfer failed" );
+			signalFailedNvidiaBridgePoint( dep, "drmSyncobjTransfer" );
 		}
 
 		drmSyncobjDestroy( dep.pTimelineSemaphore->nDrmRenderFd, uTempSyncobj );
@@ -1521,7 +1555,7 @@ std::shared_ptr<VulkanTimelineSemaphore_t> CVulkanDevice::ImportTimelineSemaphor
 	};
 	if ( ( res = vk.ImportSemaphoreFdKHR( m_device, &importFdInfo ) ) != VK_SUCCESS )
 	{
-		vk_errorf( res, "vkImportSemaphoreFdKHR failed" );
+		vk_errorf( res, "vkImportSemaphoreFdKHR failed (OPAQUE_FD import, fd=%d)", importFdInfo.fd );
 		close( importFdInfo.fd );
 		return nullptr;
 	}
@@ -1541,7 +1575,8 @@ std::shared_ptr<VulkanTimelineSemaphore_t> CVulkanDevice::ImportSyncPointAsBinar
 
 	if ( drmSyncobjTransfer( nDrmRenderFd, uTempSyncobj, 0, uSyncobjHandle, ulPoint, 0 ) != 0 )
 	{
-		vk_log.errorf_errno( "ImportSyncPointAsBinary: drmSyncobjTransfer failed" );
+		vk_log.errorf_errno( "ImportSyncPointAsBinary: drmSyncobjTransfer failed (syncobj 0x%x point %llu)",
+			uSyncobjHandle, (unsigned long long)ulPoint );
 		drmSyncobjDestroy( nDrmRenderFd, uTempSyncobj );
 		return nullptr;
 	}
@@ -1549,7 +1584,8 @@ std::shared_ptr<VulkanTimelineSemaphore_t> CVulkanDevice::ImportSyncPointAsBinar
 	int nSyncFileFd = -1;
 	if ( drmSyncobjExportSyncFile( nDrmRenderFd, uTempSyncobj, &nSyncFileFd ) != 0 )
 	{
-		vk_log.errorf_errno( "ImportSyncPointAsBinary: drmSyncobjExportSyncFile failed" );
+		vk_log.errorf_errno( "ImportSyncPointAsBinary: drmSyncobjExportSyncFile failed (syncobj 0x%x point %llu)",
+			uSyncobjHandle, (unsigned long long)ulPoint );
 		drmSyncobjDestroy( nDrmRenderFd, uTempSyncobj );
 		return nullptr;
 	}
@@ -1583,7 +1619,8 @@ std::shared_ptr<VulkanTimelineSemaphore_t> CVulkanDevice::ImportSyncPointAsBinar
 
 	if ( ( res = vk.ImportSemaphoreFdKHR( m_device, &importInfo ) ) != VK_SUCCESS )
 	{
-		vk_errorf( res, "ImportSyncPointAsBinary: vkImportSemaphoreFdKHR SYNC_FD failed" );
+		vk_errorf( res, "ImportSyncPointAsBinary: vkImportSemaphoreFdKHR SYNC_FD failed (syncobj 0x%x point %llu, fd=%d)",
+			uSyncobjHandle, (unsigned long long)ulPoint, nSyncFileFd );
 		close( nSyncFileFd );
 		return nullptr;
 	}
@@ -1618,7 +1655,8 @@ std::shared_ptr<VulkanTimelineSemaphore_t> CVulkanDevice::CreateExportableBinary
 	VkResult res;
 	if ( ( res = vk.CreateSemaphore( m_device, &createInfo, nullptr, &pSemaphore->pVkSemaphore ) ) != VK_SUCCESS )
 	{
-		vk_errorf( res, "CreateExportableBinarySemaphore: vkCreateSemaphore failed" );
+		vk_errorf( res, "CreateExportableBinarySemaphore: vkCreateSemaphore failed (syncobj 0x%x point %llu)",
+			uSyncobjHandle, (unsigned long long)ulPoint );
 		return nullptr;
 	}
 
@@ -1635,7 +1673,7 @@ void CVulkanCmdBuffer::AddSignal( std::shared_ptr<VulkanTimelineSemaphore_t> pTi
 	m_ExternalSignals.emplace_back( std::move( pTimelineSemaphore ), ulPoint );
 }
 
-void CVulkanDevice::wait(uint64_t sequence, bool reset)
+bool CVulkanDevice::wait(uint64_t sequence, bool reset)
 {
 	if (m_submissionSeqNo == sequence)
 		m_uploadBufferOffset = 0;
@@ -1647,15 +1685,30 @@ void CVulkanDevice::wait(uint64_t sequence, bool reset)
 		.pValues = &sequence,
 	} ;
 
-	vk_check( vk.WaitSemaphores( device(), &waitInfo, ~0ull ) );
+	const uint64_t ulTimeoutNs = cv_vulkan_wait_timeout_ms == 0u
+		? ~0ull
+		: uint64_t( cv_vulkan_wait_timeout_ms ) * 1000000ull;
+	VkResult res = vk.WaitSemaphores( device(), &waitInfo, ulTimeoutNs );
+	if ( res == VK_TIMEOUT )
+	{
+		vk_log.errorf( "Timed out waiting for Vulkan sequence %llu after %u ms",
+			(unsigned long long)sequence, (uint32_t)cv_vulkan_wait_timeout_ms );
+		return false;
+	}
+	if ( res != VK_SUCCESS )
+	{
+		vk_errorf( res, "vkWaitSemaphores failed while waiting for sequence %llu", (unsigned long long)sequence );
+		return false;
+	}
 
 	if (reset)
 		resetCmdBuffers(sequence);
+	return true;
 }
 
-void CVulkanDevice::waitIdle(bool reset)
+bool CVulkanDevice::waitIdle(bool reset)
 {
-	wait(m_submissionSeqNo, reset);
+	return wait(m_submissionSeqNo, reset);
 }
 
 void CVulkanDevice::resetCmdBuffers(uint64_t sequence)
@@ -3229,7 +3282,11 @@ void vulkan_update_luts(const gamescope::Rc<CVulkanTexture>& lut1d, const gamesc
 	cmdBuffer->copyBufferToImage(g_device.uploadBuffer(), base_offset, 0, lut1d);
 	cmdBuffer->copyBufferToImage(g_device.uploadBuffer(), base_offset + lut1d_size, 0, lut3d);
 	g_device.submit(std::move(cmdBuffer));
-	g_device.waitIdle(); // TODO: Sync this better
+	if ( !g_device.waitIdle() )
+	{
+		vk_log.errorf( "upload_lut_textures: waitIdle failed; draining device" );
+		g_device.vk.DeviceWaitIdle( g_device.device() );
+	}
 }
 
 gamescope::Rc<CVulkanTexture> vulkan_get_hacky_blank_texture()
@@ -3261,7 +3318,11 @@ gamescope::OwningRc<CVulkanTexture> vulkan_create_flat_texture( uint32_t width, 
 	auto cmdBuffer = g_device.commandBuffer();
 	cmdBuffer->copyBufferToImage(g_device.uploadBuffer(), offset, 0, texture.get());
 	g_device.submit(std::move(cmdBuffer));
-	g_device.waitIdle();
+	if ( !g_device.waitIdle() )
+	{
+		vk_log.errorf( "vulkan_create_flat_texture: waitIdle failed; draining device" );
+		g_device.vk.DeviceWaitIdle( g_device.device() );
+	}
 
 	return texture;
 }
@@ -3402,7 +3463,11 @@ bool vulkan_remake_swapchain( void )
 	g_currentPresentWaitId.notify_all();
 
 	VulkanOutput_t *pOutput = &g_output;
-	g_device.waitIdle();
+	if ( !g_device.waitIdle() )
+	{
+		vk_log.errorf( "vulkan_remake_swapchain: waitIdle failed; draining device before swapchain teardown" );
+		g_device.vk.DeviceWaitIdle( g_device.device() );
+	}
 	g_device.vk.QueueWaitIdle( g_device.queue() );
 
 	pOutput->outputImages.clear();
@@ -3501,7 +3566,11 @@ static bool vulkan_make_output_images( VulkanOutput_t *pOutput )
 bool vulkan_remake_output_images()
 {
 	VulkanOutput_t *pOutput = &g_output;
-	g_device.waitIdle();
+	if ( !g_device.waitIdle() )
+	{
+		vk_log.errorf( "vulkan_remake_output_images: waitIdle failed; draining device" );
+		g_device.vk.DeviceWaitIdle( g_device.device() );
+	}
 
 	pOutput->nOutImage = 0;
 
@@ -3743,7 +3812,11 @@ gamescope::OwningRc<CVulkanTexture> vulkan_create_texture_from_bits( uint32_t wi
 	// TODO: Sync this copyBufferToImage.
 
 	g_device.submit(std::move(cmdBuffer));
-	g_device.waitIdle();
+	if ( !g_device.waitIdle() )
+	{
+		vk_log.errorf( "vulkan_create_texture_from_bits: waitIdle failed; draining device" );
+		g_device.vk.DeviceWaitIdle( g_device.device() );
+	}
 
 	return pTex;
 }
@@ -4129,7 +4202,8 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
 			if (pipeline != nullptr)
 			{
 				uint64_t seq = pipeline->execute(frameInfo->layers[0].tex, &frameInfo->layers[0].tex);
-				g_device.wait(seq);
+				if ( !g_device.wait(seq) )
+					vk_log.errorf( "reshade execute: wait failed for sequence %llu; output may be inconsistent", (unsigned long long)seq );
 			}
 		}
 	}
@@ -4335,9 +4409,14 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
 	return sequence;
 }
 
-void vulkan_wait( uint64_t ulSeqNo, bool bReset )
+bool vulkan_wait( uint64_t ulSeqNo, bool bReset )
 {
 	return g_device.wait( ulSeqNo, bReset );
+}
+
+bool vulkan_wait_idle()
+{
+	return g_device.waitIdle();
 }
 
 gamescope::Rc<CVulkanTexture> vulkan_get_last_output_image( bool partial, bool defer )
@@ -4381,6 +4460,29 @@ bool vulkan_supports_modifiers(void)
 bool vulkan_is_nvidia(void)
 {
 	return g_device.isNvidiaDevice();
+}
+
+const char *vulkan_get_driver_version_summary( void )
+{
+	thread_local static char s_buf[256];
+	VkPhysicalDeviceProperties props{};
+	g_device.vk.GetPhysicalDeviceProperties( g_device.physDev(), &props );
+
+	if ( g_device.isNvidiaDevice() )
+	{
+		// NVIDIA packs driver version in props.driverVersion (see Vulkan spec / NVIDIA driver notes).
+		const uint32_t v = props.driverVersion;
+		const unsigned major = ( v >> 22 ) & 0x3ffu;
+		const unsigned minor = ( v >> 14 ) & 0xffu;
+		const unsigned tertiary = ( v >> 6 ) & 0xffu;
+		const unsigned patch = v & 0x3fu;
+		snprintf( s_buf, sizeof s_buf, "%.200s %u.%u.%u.%u", props.deviceName, major, minor, tertiary, patch );
+	}
+	else
+	{
+		snprintf( s_buf, sizeof s_buf, "%.200s drvr=0x%08x", props.deviceName, props.driverVersion );
+	}
+	return s_buf;
 }
 
 static void texture_destroy( struct wlr_texture *wlr_texture )
@@ -4539,7 +4641,11 @@ gamescope::OwningRc<CVulkanTexture> vulkan_create_texture_from_wlr_buffer( struc
 
 	uint64_t sequence = g_device.submit(std::move(cmdBuffer));
 
-	g_device.wait(sequence);
+	if ( !g_device.wait(sequence) )
+	{
+		vk_log.errorf( "vulkan_create_texture_from_wlr_buffer: wait failed for sequence %llu; draining device before freeing staging buffer", (unsigned long long)sequence );
+		g_device.vk.DeviceWaitIdle( g_device.device() );
+	}
 
 	g_device.vk.DestroyBuffer(g_device.device(), buffer, nullptr);
 	g_device.vk.FreeMemory(g_device.device(), bufferMemory, nullptr);

@@ -4,6 +4,7 @@
 #include "Timeline.h"
 #include "wlserver.hpp"
 #include "rendervulkan.hpp"
+#include "convar.h"
 
 #include "wlr_begin.hpp"
 #include <wlr/render/drm_syncobj.h>
@@ -13,6 +14,7 @@
 namespace gamescope
 {
     static LogScope s_TimelineLog( "timeline" );
+    static gamescope::ConVar<uint32_t> cv_timeline_wait_timeout_ms( "timeline_wait_timeout_ms", 15000, "Timeout for timeline waits in milliseconds when callers request an infinite wait. Set to 0 for infinite." );
 
     static uint32_t SyncobjFdToHandle( int32_t nFd )
     {
@@ -94,6 +96,12 @@ namespace gamescope
 
     std::shared_ptr<VulkanTimelineSemaphore_t> CTimeline::ToVkSemaphore()
     {
+        if ( g_device.isNvidiaDevice() )
+        {
+            s_TimelineLog.errorf( "CTimeline::ToVkSemaphore called on NVIDIA timeline. Refusing OPAQUE_FD timeline import path." );
+            return nullptr;
+        }
+
         if ( !m_pVkSemaphore )
             m_pVkSemaphore = g_device.ImportTimelineSemaphore( this );
 
@@ -124,9 +132,12 @@ namespace gamescope
     {
         if ( ShouldSignalOnDestruction() )
         {
-            const uint32_t uHandle = m_pTimeline->GetSyncobjHandle();
-
-            drmSyncobjTimelineSignal( m_pTimeline->GetDrmRenderFD(), &uHandle, &m_ulPoint, 1 );
+            uint32_t uHandle = m_pTimeline->GetSyncobjHandle();
+            if ( drmSyncobjTimelineSignal( m_pTimeline->GetDrmRenderFD(), &uHandle, &m_ulPoint, 1 ) != 0 )
+            {
+                s_TimelineLog.errorf_errno( "CTimelinePoint::~CTimelinePoint drmSyncobjTimelineSignal failed (syncobj 0x%x point %llu)",
+                    uHandle, (unsigned long long)m_ulPoint );
+            }
         }
     }
 
@@ -134,6 +145,10 @@ namespace gamescope
     bool CTimelinePoint<Type>::Wait( int64_t lTimeout )
     {
         uint32_t uHandle = m_pTimeline->GetSyncobjHandle();
+        if ( lTimeout == std::numeric_limits<int64_t>::max() && cv_timeline_wait_timeout_ms > 0u )
+        {
+            lTimeout = int64_t( uint64_t( cv_timeline_wait_timeout_ms ) * 1000000ull );
+        }
 
         int nRet = drmSyncobjTimelineWait(
             m_pTimeline->GetDrmRenderFD(),
@@ -143,6 +158,13 @@ namespace gamescope
             lTimeout,
             DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL,
             nullptr );
+
+        if ( nRet != 0 )
+        {
+            s_TimelineLog.errorf( "drmSyncobjTimelineWait failed/timed out (ret=%d syncobj=0x%x point=%llu timeout_ms=%u)",
+                nRet, uHandle, (unsigned long long)m_ulPoint,
+                lTimeout == std::numeric_limits<int64_t>::max() ? 0u : (uint32_t)( lTimeout / 1000000ull ) );
+        }
 
         return nRet == 0;
     }

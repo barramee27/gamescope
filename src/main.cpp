@@ -46,6 +46,8 @@ using namespace std::literals;
 EStreamColorspace g_ForcedNV12ColorSpace = k_EStreamColorspace_Unknown;
 extern gamescope::ConVar<bool> cv_adaptive_sync;
 extern gamescope::ConVar<bool> cv_shutdown_on_primary_child_death;
+extern gamescope::ConVar<bool> cv_drm_debug_disable_in_fence_fd;
+extern gamescope::ConVar<bool> cv_drm_nvidia_explicit_sync_via_sync_fd;
 
 const char *gamescope_optstring = nullptr;
 const char *g_pOriginalDisplay = nullptr;
@@ -687,6 +689,20 @@ static void UpdateCompatEnvVars()
 	}
 }
 
+static const char *backend_to_string( gamescope::GamescopeBackend backend )
+{
+	switch ( backend )
+	{
+		case gamescope::GamescopeBackend::Auto: return "auto";
+		case gamescope::GamescopeBackend::DRM: return "drm";
+		case gamescope::GamescopeBackend::SDL: return "sdl";
+		case gamescope::GamescopeBackend::OpenVR: return "openvr";
+		case gamescope::GamescopeBackend::Headless: return "headless";
+		case gamescope::GamescopeBackend::Wayland: return "wayland";
+		default: return "unknown";
+	}
+}
+
 int g_nPreferredOutputWidth = 0;
 int g_nPreferredOutputHeight = 0;
 bool g_bExposeWayland = false;
@@ -983,6 +999,23 @@ int main(int argc, char **argv)
 	{
 		fprintf( stderr, "vulkan_make_output failed\n" );
 		return 1;
+	}
+
+	if ( access( "/dev/nvidiactl", F_OK ) == 0 )
+	{
+		fprintf( stderr,
+			"NVIDIA runtime summary: vulkan_driver=%s backend=%s explicit_sync=%s nvidia_sync_fd_optin=%s in_fence_fd_disabled=%s\n",
+			vulkan_get_driver_version_summary(),
+			backend_to_string( eCurrentBackend ),
+			GetBackend() && GetBackend()->SupportsExplicitSync() ? "yes" : "no",
+			(bool)cv_drm_nvidia_explicit_sync_via_sync_fd ? "yes" : "no",
+			(bool)cv_drm_debug_disable_in_fence_fd ? "yes" : "no" );
+
+		if ( eCurrentBackend == gamescope::GamescopeBackend::Wayland )
+		{
+			fprintf( stderr, "WARNING: NVIDIA + nested Wayland backend may be unstable in hybrid setups. "
+			                 "Recommend --backend sdl unless you are debugging Wayland backend behavior.\n" );
+		}
 	}
 
 	// Prevent our clients from connecting to the parent compositor
