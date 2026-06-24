@@ -274,6 +274,8 @@ const char *wlserver_get_wl_display_name( void );
 void wlserver_x11_surface_info_init( struct wlserver_x11_surface_info *surf, gamescope_xwayland_server_t *server, uint32_t x11_id );
 void wlserver_x11_surface_info_finish( struct wlserver_x11_surface_info *surf );
 
+wlserver_wl_surface_info *get_wl_surface_info( struct wlr_surface *wlr_surf );
+
 void wlserver_set_xwayland_server_mode( size_t idx, int w, int h, int refresh );
 
 extern std::atomic<bool> g_bPendingTouchMovement;

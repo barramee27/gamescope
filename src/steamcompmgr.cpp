@@ -1388,6 +1388,13 @@ static steamcompmgr_win_t * find_win( xwayland_ctx_t *ctx, struct wlr_surface *s
 			return w;
 	}
 
+	// Gamescope WSI can commit before main_surface is stored on the X11 window.
+	// Follow the surface backlink so GRB/Ubisoft frames are not dropped as
+	// "waylandres but no win" during launcher → game handoff.
+	wlserver_wl_surface_info *wl_info = get_wl_surface_info( surf );
+	if ( wl_info && wl_info->x11_surface && wl_info->x11_surface->xwayland_server == ctx->xwayland_server )
+		return find_win( ctx, wl_info->x11_surface->x11_id, false );
+
 	return nullptr;
 }
 
@@ -3280,6 +3287,33 @@ win_has_game_id( steamcompmgr_win_t *w )
 	return w->appID != 0;
 }
 
+static constexpr uint32_t k_nAppIdGhostReconBreakpoint = 2231380;
+
+static bool
+win_title_contains( steamcompmgr_win_t *w, const char *pszNeedle )
+{
+	return w->title && w->title->find( pszNeedle ) != std::string::npos;
+}
+
+static uint64_t
+win_pixel_area( steamcompmgr_win_t *w )
+{
+	const auto rect = w->GetGeometry();
+	return uint64_t( rect.nWidth ) * uint64_t( rect.nHeight );
+}
+
+static bool
+win_is_ubisoft_launcher_window( steamcompmgr_win_t *w )
+{
+	if ( w->appID != k_nAppIdGhostReconBreakpoint )
+		return false;
+
+	if ( win_title_contains( w, "Ghost Recon" ) )
+		return false;
+
+	return win_title_contains( w, "Ubisoft" ) || win_title_contains( w, "Uplay" );
+}
+
 static bool
 win_is_useless( steamcompmgr_win_t *w )
 {
@@ -3416,6 +3450,27 @@ is_focus_priority_greater( steamcompmgr_win_t *a, steamcompmgr_win_t *b )
 	// If the window is 1x1 then prefer anything else we have.
 	if ( win_is_useless( a ) != win_is_useless( b ) )
 		return !win_is_useless( a );
+
+	// Ghost Recon Breakpoint: Ubisoft Connect popups share the Steam appID but are
+	// not the game surface — prefer the main game window once it exists.
+	if ( win_is_ubisoft_launcher_window( a ) != win_is_ubisoft_launcher_window( b ) )
+		return !win_is_ubisoft_launcher_window( a );
+
+	if ( a->appID == k_nAppIdGhostReconBreakpoint && b->appID == k_nAppIdGhostReconBreakpoint )
+	{
+		const bool bMainA = win_title_contains( a, "Ghost Recon" );
+		const bool bMainB = win_title_contains( b, "Ghost Recon" );
+		if ( bMainA != bMainB )
+			return bMainA;
+	}
+
+	if ( win_has_game_id( a ) && win_has_game_id( b ) && a->appID == b->appID )
+	{
+		const uint64_t ulAreaA = win_pixel_area( a );
+		const uint64_t ulAreaB = win_pixel_area( b );
+		if ( ulAreaA != ulAreaB )
+			return ulAreaA > ulAreaB;
+	}
 
 	if ( win_maybe_a_dropdown( a ) != win_maybe_a_dropdown( b ) )
 		return !win_maybe_a_dropdown( a );

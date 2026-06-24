@@ -18,6 +18,7 @@
 #include <getopt.h>
 #include <signal.h>
 #include <unistd.h>
+#include <sys/utsname.h>
 #include <float.h>
 #include <climits>
 
@@ -1003,13 +1004,44 @@ int main(int argc, char **argv)
 
 	if ( access( "/dev/nvidiactl", F_OK ) == 0 )
 	{
+		utsname un{};
+		const char *pchKernel = "unknown";
+		int nKernelMajor = 0;
+		if ( uname( &un ) == 0 )
+		{
+			pchKernel = un.release;
+			nKernelMajor = atoi( un.release );
+		}
+
+		const bool bDriver595Plus = vulkan_nvidia_driver_at_least( 595, 0 );
+		const bool bKernel7Plus = nKernelMajor >= 7;
+
 		fprintf( stderr,
-			"NVIDIA runtime summary: vulkan_driver=%s backend=%s explicit_sync=%s nvidia_sync_fd_optin=%s in_fence_fd_disabled=%s\n",
+			"NVIDIA runtime summary: kernel=%s vulkan_driver=%s backend=%s explicit_sync=%s nvidia_sync_fd_optin=%s in_fence_fd_disabled=%s\n",
+			pchKernel,
 			vulkan_get_driver_version_summary(),
 			backend_to_string( eCurrentBackend ),
 			GetBackend() && GetBackend()->SupportsExplicitSync() ? "yes" : "no",
 			(bool)cv_drm_nvidia_explicit_sync_via_sync_fd ? "yes" : "no",
 			(bool)cv_drm_debug_disable_in_fence_fd ? "yes" : "no" );
+
+		if ( bDriver595Plus && bKernel7Plus )
+		{
+			fprintf( stderr,
+				"NVIDIA stack note: Linux 7 + driver 595+ is a supported target for this fork "
+				"(modeset=1 default, improved swapchain resize and low-VRAM fallback in the driver). "
+				"Nested Wayland on hybrid laptops should still use the SDL backend (default with auto).\n" );
+		}
+		else if ( bDriver595Plus )
+		{
+			fprintf( stderr,
+				"NVIDIA stack note: driver 595+ enables nvidia-drm modeset=1 by default and improves Vulkan swapchain stability.\n" );
+		}
+		else if ( bKernel7Plus )
+		{
+			fprintf( stderr,
+				"NVIDIA stack note: Linux 7 kernel detected; consider upgrading to NVIDIA driver 595+ for best Wayland/KMS compatibility.\n" );
+		}
 
 		if ( eCurrentBackend == gamescope::GamescopeBackend::Wayland )
 		{
