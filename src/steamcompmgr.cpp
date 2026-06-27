@@ -1389,11 +1389,13 @@ static steamcompmgr_win_t * find_win( xwayland_ctx_t *ctx, struct wlr_surface *s
 	}
 
 	// Gamescope WSI can commit before main_surface is stored on the X11 window.
-	// Follow the surface backlink so GRB/Ubisoft frames are not dropped as
-	// "waylandres but no win" during launcher → game handoff.
+	// Follow the surface backlink only during that early handoff window. Once
+	// the X11 surface has a current surface, unmatched commits are stale/helper
+	// surfaces and should not be imported into the game window.
 	wlserver_wl_surface_info *wl_info = get_wl_surface_info( surf );
-	if ( wl_info && wl_info->x11_surface && wl_info->x11_surface->xwayland_server == ctx->xwayland_server )
-		return find_win( ctx, wl_info->x11_surface->x11_id, false );
+	wlserver_x11_surface_info *x11_surface = wl_info ? wl_info->x11_surface : nullptr;
+	if ( x11_surface && x11_surface->xwayland_server == ctx->xwayland_server && x11_surface->current_surface() == nullptr )
+		return find_win( ctx, x11_surface->x11_id, false );
 
 	return nullptr;
 }
