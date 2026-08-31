@@ -897,6 +897,11 @@ int main(int argc, char **argv)
 	g_pOriginalDisplay = getenv("DISPLAY");
 	g_pOriginalWaylandDisplay = getenv("WAYLAND_DISPLAY");
 
+	// Always default-hide present_wait on NVIDIA (including forced backends).
+	// User can override with GAMESCOPE_WSI_HIDE_PRESENT_WAIT_EXT=0.
+	if ( access( "/dev/nvidiactl", F_OK ) == 0 )
+		setenv( "GAMESCOPE_WSI_HIDE_PRESENT_WAIT_EXT", "1", 0 );
+
 	if ( eCurrentBackend == gamescope::GamescopeBackend::Auto )
 	{
 		if ( g_pOriginalWaylandDisplay != NULL )

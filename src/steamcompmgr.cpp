@@ -7129,6 +7129,20 @@ static TempUpscaleImage_t *GetTempUpscaleImage( uint32_t uWidth, uint32_t uHeigh
 
 gamescope::ConVar<bool> cv_surface_update_force_only_current_surface( "surface_update_force_only_current_surface", false, "Force updates to apply only to the current surface, ignoring commits for other surfaces." );
 
+static void
+send_frame_done_for_discarded_commit( struct wlr_surface *surf )
+{
+	if ( surf == nullptr )
+		return;
+
+	struct timespec now;
+	clock_gettime( CLOCK_MONOTONIC, &now );
+
+	wlserver_lock();
+	wlserver_send_frame_done( surf, &now );
+	wlserver_unlock();
+}
+
 void update_wayland_res(CommitDoneList_t *doneCommits, steamcompmgr_win_t *w, ResListEntry_t& reslistentry)
 {
 	struct wlr_buffer *buf = reslistentry.buf;
@@ -7138,6 +7152,8 @@ void update_wayland_res(CommitDoneList_t *doneCommits, steamcompmgr_win_t *w, Re
 		wlserver_lock();
 		wlr_buffer_unlock( buf );
 		wlserver_unlock();
+
+		send_frame_done_for_discarded_commit( reslistentry.surf );
 
 		// Make sure to send the discarded event if we hit this
 		// to ensure forward progress.
@@ -7182,26 +7198,38 @@ void update_wayland_res(CommitDoneList_t *doneCommits, steamcompmgr_win_t *w, Re
 		wlr_buffer_unlock( buf );
 		wlserver_unlock();
 		w->receivedDoneCommit = true;
+		send_frame_done_for_discarded_commit( reslistentry.surf );
 		return;
 	}
 
-	bool already_exists = false;
+	gamescope::Rc<commit_t> duplicate_commit;
 	for ( const auto& existing_commit : w->commit_queue )
 	{
 		if (existing_commit->buf == buf)
-			already_exists = true;
+		{
+			duplicate_commit = existing_commit;
+			break;
+		}
 	}
 
-	if ( already_exists && !reslistentry.feedback && reslistentry.presentation_feedbacks.empty() )
+	if ( duplicate_commit != nullptr )
 	{
 		wlserver_lock();
 		wlr_buffer_unlock( buf );
 		wlserver_unlock();
 		xwm_log.warnf( "got the same buffer committed twice, ignoring." );
+		send_frame_done_for_discarded_commit( reslistentry.surf );
+		if ( !reslistentry.presentation_feedbacks.empty() )
+			wlserver_presentation_feedback_discard( reslistentry.surf, reslistentry.presentation_feedbacks );
 
 		// If we have a duplicated commit + frame callback, ensure that is signalled.
 		// This matches Mutter and Weston behavior, so it's plausible that some application relies on forward progress.
 		// We're essentially discarding the commit here, so consider it complete right away.
+		if ( !duplicate_commit->done )
+		{
+			duplicate_commit->Signal();
+			nudge_steamcompmgr();
+		}
 		w->receivedDoneCommit = true;
 		return;
 	}
@@ -8130,7 +8158,7 @@ static LogScope s_LaunchLogScope( "launch" );
 
 static std::vector<uint32_t> s_uRelativeMouseFilteredAppids;
 static gamescope::ConVar<std::string> cv_mouse_relative_filter_appids( "mouse_relative_filter_appids",
-"8400" /* Geometry Wars: Retro Evolved */,
+"8400,218620" /* Geometry Wars: Retro Evolved, PAYDAY 2 (Diesel DX9 cursor needs absolute mouse) */,
 "Comma separated appids to filter out using relative mouse mode for.",
 []( gamescope::ConVar<std::string> &cvar )
 {
@@ -8195,6 +8223,47 @@ void LaunchNestedChildren( char **ppPrimaryChildArgv )
 		// Enable Gamescope WSI by default for nested.
 		setenv( "ENABLE_GAMESCOPE_WSI", "1", 0 );
 
+		// Prefer the WSI layer that was built alongside this gamescope binary.
+		// Distro packages otherwise keep loading a stale /usr/... layer that
+		// lacks NVIDIA present_wait hang workarounds (and Steam/pressure-vessel
+		// often ignores ~/.local/share vulkan manifests).
+		{
+			char szExe[ PATH_MAX ]{};
+			ssize_t nLen = readlink( "/proc/self/exe", szExe, sizeof( szExe ) - 1 );
+			if ( nLen > 0 )
+			{
+				szExe[ nLen ] = '\0';
+				std::string sLayerDir = szExe;
+				auto nSlash = sLayerDir.find_last_of( '/' );
+				if ( nSlash != std::string::npos )
+				{
+					sLayerDir.resize( nSlash ); // .../build/src
+					nSlash = sLayerDir.find_last_of( '/' );
+					if ( nSlash != std::string::npos )
+					{
+						sLayerDir.resize( nSlash );
+						sLayerDir += "/layer";
+						std::string sLayerSo = sLayerDir + "/libVkLayer_FROG_gamescope_wsi_x86_64.so";
+						if ( access( sLayerSo.c_str(), R_OK ) == 0 )
+						{
+							const char *pszExisting = getenv( "VK_ADD_IMPLICIT_LAYER_PATH" );
+							std::string sPaths = sLayerDir;
+							if ( pszExisting && *pszExisting )
+							{
+								sPaths += ":";
+								sPaths += pszExisting;
+							}
+							setenv( "VK_ADD_IMPLICIT_LAYER_PATH", sPaths.c_str(), 1 );
+
+							// Manifest for the add path (loader looks for *.json there).
+							// Also point an absolute library_path via a tiny env override:
+							// write is unnecessary if json already lives in build/layer.
+						}
+					}
+				}
+			}
+		}
+
 		// Unset this to avoid it leaking to Proton apps, etc.
 		unsetenv( "SDL_VIDEODRIVER" );
 		// SDL3...
@@ -8218,8 +8287,11 @@ void LaunchNestedChildren( char **ppPrimaryChildArgv )
 			gamescope::Process::WaitForChild( nPrimaryChildPid );
 			s_LaunchLogScope.infof( "Primary child shut down!" );
 
+			// Skip C++ teardown. SIGTERM → ShutdownGamescope() still races the
+			// nested SDL/Vulkan path (and mangoapp) and aborts with
+			// "terminate called without an active exception" (Steam exit 134).
 			if ( cv_shutdown_on_primary_child_death )
-				ShutdownGamescope();
+				_exit( 0 );
 		});
 		waitThread.detach();
 	}

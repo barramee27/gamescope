@@ -202,6 +202,12 @@ namespace gamescope
 		std::atomic<SDLInitState> m_eSDLInit = { SDLInitState::SDLInit_Waiting };
 
 		std::atomic<bool> m_bApplicationGrabbed = { false };
+		// SDL often emits a bogus absolute SDL_MOUSEMOTION (corners like 0,0 or
+		// width-1,0) right after SDL_SetRelativeMouseMode(false). Drop a few so
+		// in-game UI cursors (Watch Dogs map/menus, etc.) don't stick in a corner.
+		// Intentionally no WarpMouse / wlserver_touchmotion here — that previously
+		// made some titles (e.g. Ghost Recon Breakpoint) exit after launch.
+		uint8_t m_uSuppressAbsoluteMouseMotionAfterRelative = 0;
 		std::atomic<bool> m_bApplicationVisible = { false };
 		std::atomic<std::shared_ptr<INestedHints::CursorInfo>> m_pApplicationCursor;
 		std::atomic<std::shared_ptr<std::string>> m_pApplicationTitle;
@@ -695,6 +701,25 @@ namespace gamescope
 					}
 					else
 					{
+						if ( m_uSuppressAbsoluteMouseMotionAfterRelative > 0 )
+						{
+							const bool bTopCorner =
+								g_nOutputWidthPts > 0 &&
+								event.motion.y <= 1 &&
+								( event.motion.x <= 1 || event.motion.x >= g_nOutputWidthPts - 2 );
+							if ( bTopCorner )
+							{
+								// Keep dropping 0,0 / width-1,0 until a real position arrives.
+								if ( cv_sdl_debug_input_events )
+								{
+									fprintf( stderr, "SDL input: suppressed corner absolute motion after relative ungrab x=%d y=%d remaining=%u\n",
+										event.motion.x, event.motion.y,
+										(unsigned)m_uSuppressAbsoluteMouseMotionAfterRelative );
+								}
+								break;
+							}
+							m_uSuppressAbsoluteMouseMotionAfterRelative = 0;
+						}
 						if ( cv_sdl_debug_input_events )
 						{
 							static uint32_t s_uAbsoluteMotionLogThrottle = 0;
@@ -966,7 +991,18 @@ namespace gamescope
 								g_nOutputWidthPts, g_nOutputHeightPts,
 								g_nOutputWidth, g_nOutputHeight );
 						}
-						SDL_SetRelativeMouseMode( m_bApplicationGrabbed ? SDL_TRUE : SDL_FALSE );
+						if ( m_bApplicationGrabbed )
+						{
+							m_uSuppressAbsoluteMouseMotionAfterRelative = 0;
+							SDL_SetRelativeMouseMode( SDL_TRUE );
+						}
+						else
+						{
+							SDL_SetRelativeMouseMode( SDL_FALSE );
+							// Drop the next few absolute motions SDL queues on ungrab
+							// (often top-left/top-right corners). No warp/touchmotion.
+							m_uSuppressAbsoluteMouseMotionAfterRelative = 3;
+						}
 					}
 					else if ( event.type == GetUserEventIndex( GAMESCOPE_SDL_EVENT_CURSOR ) )
 					{
