@@ -918,11 +918,6 @@ namespace GamescopeWSILayer {
       const vkroots::VkInstanceDispatch* pDispatch,
             VkPhysicalDevice             physicalDevice,
             VkPhysicalDeviceFeatures2*   pFeatures) {
-      if (getHidePresentWait()) {
-        fprintf(stderr, "[Gamescope WSI] Removing VkPhysicalDevicePresentWaitFeaturesKHR because GAMESCOPE_WSI_HIDE_PRESENT_WAIT_EXT is set\n");
-        vkroots::RemoveFromChain<VkPhysicalDevicePresentWaitFeaturesKHR>(pFeatures);
-        vkroots::RemoveFromChain<VkPhysicalDevicePresentIdFeaturesKHR>(pFeatures);
-      }
       pDispatch->GetPhysicalDeviceFeatures2(physicalDevice, pFeatures);
       if (getHidePresentWait()) {
         if (auto* presentWait = vkroots::FindInChainMutable<VkPhysicalDevicePresentWaitFeaturesKHR>(pFeatures))

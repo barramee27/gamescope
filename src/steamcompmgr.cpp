@@ -3466,14 +3466,6 @@ is_focus_priority_greater( steamcompmgr_win_t *a, steamcompmgr_win_t *b )
 			return bMainA;
 	}
 
-	if ( win_has_game_id( a ) && win_has_game_id( b ) && a->appID == b->appID )
-	{
-		const uint64_t ulAreaA = win_pixel_area( a );
-		const uint64_t ulAreaB = win_pixel_area( b );
-		if ( ulAreaA != ulAreaB )
-			return ulAreaA > ulAreaB;
-	}
-
 	if ( win_maybe_a_dropdown( a ) != win_maybe_a_dropdown( b ) )
 		return !win_maybe_a_dropdown( a );
 
@@ -3484,6 +3476,14 @@ is_focus_priority_greater( steamcompmgr_win_t *a, steamcompmgr_win_t *b )
 	// See https://github.com/Plagman/gamescope/issues/87
 	if ( win_skip_and_not_fullscreen( a ) != win_skip_and_not_fullscreen( b ) )
 		return !win_skip_and_not_fullscreen( a );
+
+	if ( win_has_game_id( a ) && win_has_game_id( b ) && a->appID == b->appID )
+	{
+		const uint64_t ulAreaA = win_pixel_area( a );
+		const uint64_t ulAreaB = win_pixel_area( b );
+		if ( ulAreaA != ulAreaB )
+			return ulAreaA > ulAreaB;
+	}
 
 	// Prefer normal windows over dialogs
 	// if we are an override redirect/dropdown window.
@@ -7202,34 +7202,24 @@ void update_wayland_res(CommitDoneList_t *doneCommits, steamcompmgr_win_t *w, Re
 		return;
 	}
 
-	gamescope::Rc<commit_t> duplicate_commit;
+	bool already_exists = false;
 	for ( const auto& existing_commit : w->commit_queue )
 	{
 		if (existing_commit->buf == buf)
-		{
-			duplicate_commit = existing_commit;
-			break;
-		}
+			already_exists = true;
 	}
 
-	if ( duplicate_commit != nullptr )
+	if ( already_exists && !reslistentry.feedback && reslistentry.presentation_feedbacks.empty() )
 	{
 		wlserver_lock();
 		wlr_buffer_unlock( buf );
 		wlserver_unlock();
 		xwm_log.warnf( "got the same buffer committed twice, ignoring." );
 		send_frame_done_for_discarded_commit( reslistentry.surf );
-		if ( !reslistentry.presentation_feedbacks.empty() )
-			wlserver_presentation_feedback_discard( reslistentry.surf, reslistentry.presentation_feedbacks );
 
 		// If we have a duplicated commit + frame callback, ensure that is signalled.
 		// This matches Mutter and Weston behavior, so it's plausible that some application relies on forward progress.
 		// We're essentially discarding the commit here, so consider it complete right away.
-		if ( !duplicate_commit->done )
-		{
-			duplicate_commit->Signal();
-			nudge_steamcompmgr();
-		}
 		w->receivedDoneCommit = true;
 		return;
 	}
@@ -8246,18 +8236,57 @@ void LaunchNestedChildren( char **ppPrimaryChildArgv )
 						std::string sLayerSo = sLayerDir + "/libVkLayer_FROG_gamescope_wsi_x86_64.so";
 						if ( access( sLayerSo.c_str(), R_OK ) == 0 )
 						{
-							const char *pszExisting = getenv( "VK_ADD_IMPLICIT_LAYER_PATH" );
-							std::string sPaths = sLayerDir;
-							if ( pszExisting && *pszExisting )
-							{
-								sPaths += ":";
-								sPaths += pszExisting;
-							}
-							setenv( "VK_ADD_IMPLICIT_LAYER_PATH", sPaths.c_str(), 1 );
+							// Loader only searches this env for JSON manifests, then
+							// follows library_path from the JSON. Meson's build/layer
+							// JSON still has an absolute install-prefix path, so write
+							// a temp manifest that points at the adjacent build .so.
+							char szJsonDir[ PATH_MAX ]{};
+							const char *pszRuntime = getenv( "XDG_RUNTIME_DIR" );
+							if ( pszRuntime && *pszRuntime )
+								snprintf( szJsonDir, sizeof( szJsonDir ), "%s/gamescope-wsi-XXXXXX", pszRuntime );
+							else
+								snprintf( szJsonDir, sizeof( szJsonDir ), "/tmp/gamescope-wsi-XXXXXX" );
 
-							// Manifest for the add path (loader looks for *.json there).
-							// Also point an absolute library_path via a tiny env override:
-							// write is unnecessary if json already lives in build/layer.
+							if ( mkdtemp( szJsonDir ) != nullptr )
+							{
+								std::string sJsonPath = std::string( szJsonDir ) + "/VkLayer_FROG_gamescope_wsi.x86_64.json";
+								FILE *pJson = fopen( sJsonPath.c_str(), "w" );
+								if ( pJson )
+								{
+									fprintf( pJson,
+										"{\n"
+										"    \"file_format_version\" : \"1.0.0\",\n"
+										"    \"layer\" : {\n"
+										"      \"name\": \"VK_LAYER_FROG_gamescope_wsi_x86_64\",\n"
+										"      \"type\": \"GLOBAL\",\n"
+										"      \"api_version\": \"1.3.221\",\n"
+										"      \"library_path\": \"%s\",\n"
+										"      \"implementation_version\": \"1\",\n"
+										"      \"description\": \"Gamescope WSI (XWayland Bypass) Layer (x86_64)\",\n"
+										"      \"functions\": {\n"
+										"         \"vkNegotiateLoaderLayerInterfaceVersion\": \"vkNegotiateLoaderLayerInterfaceVersion\"\n"
+										"      },\n"
+										"      \"enable_environment\": {\n"
+										"        \"ENABLE_GAMESCOPE_WSI\": \"1\"\n"
+										"      },\n"
+										"      \"disable_environment\": {\n"
+										"        \"DISABLE_GAMESCOPE_WSI\": \"1\"\n"
+										"      }\n"
+										"    }\n"
+										"}\n",
+										sLayerSo.c_str() );
+									fclose( pJson );
+
+									const char *pszExisting = getenv( "VK_ADD_IMPLICIT_LAYER_PATH" );
+									std::string sPaths = szJsonDir;
+									if ( pszExisting && *pszExisting )
+									{
+										sPaths += ":";
+										sPaths += pszExisting;
+									}
+									setenv( "VK_ADD_IMPLICIT_LAYER_PATH", sPaths.c_str(), 1 );
+								}
+							}
 						}
 					}
 				}
