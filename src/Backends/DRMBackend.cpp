@@ -1289,11 +1289,22 @@ bool init_drm(struct drm_t *drm, int width, int height, int refresh)
 		cv_drm_debug_disable_in_fence_fd = true;
 	}
 
+	if ( vulkan_is_nvidia() )
+	{
+		auto [nKMajor, nKMinor, nKPatch] = gamescope::GetKernelVersion();
+		drm_log.infof( "NVIDIA stack: kernel=%d.%d.%d vulkan_driver=%s drm_modeset_default_on_595=%d",
+			nKMajor, nKMinor, nKPatch,
+			vulkan_get_driver_version_summary(),
+			vulkan_nvidia_driver_at_least( 595, 0 ) ? 1 : 0 );
+	}
+
 	/*
 	 * NVIDIA KMS: IN_FENCE_FD vs drm_nvidia_explicit_sync_via_sync_fd
 	 *
 	 * Plane IN_FENCE_FD (drm_prepare_liftoff) is forced off above for proprietary
 	 * NVIDIA because atomic commits can return EPERM (fallback in drm_prepare_liftoff).
+	 * Since driver 555, DRM_CAP_SYNCOBJ is advertised but IN_FENCE_FD still fails;
+	 * R595 enables nvidia-drm modeset=1 by default and improves swapchain/VRAM behavior.
 	 * Opt-in explicit sync (drm_nvidia_explicit_sync_via_sync_fd) only affects
 	 * SupportsExplicitSync() and the Vulkan SYNC_FD <-> DRM syncobj bridge used for
 	 * client buffer timelines; it does not re-enable plane IN_FENCE. Those paths are
@@ -3873,8 +3884,10 @@ namespace gamescope
 
 #if __linux__
 			auto [nMajor, nMinor, nPatch] = GetKernelVersion();
-			
-			// Only expose support on 6.8+ for eventfd fixes.
+
+			// Kernel 6.8+ (including Linux 7.x): DRM_SYNCOBJ_EVENTFD fixes required for
+			// compositor-side explicit sync waits. Linux 7 also adds /dev/syncobj for
+			// device-independent syncobj ioctls; gamescope still uses the render-node fd.
 			if ( nMajor < 6 )
 				return false;
 

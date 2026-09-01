@@ -5,3 +5,10 @@ subprojects/v4l-utils/
 subprojects/v4l-utils.wrap
 *.log
 reddit-post.md
+
+# Windows / Wine / Proton crash artifacts (opaque blobs; keep out of git—attach in issues instead)
+*.dmp
+*.mdmp
+crashrpt.xml
+# Typical CrashRpt export name: <uuid>.zip (contains crashdump.dmp + crashrpt.xml)
+????????-????-????-????-????????????.zip

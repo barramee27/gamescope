@@ -1388,6 +1388,15 @@ static steamcompmgr_win_t * find_win( xwayland_ctx_t *ctx, struct wlr_surface *s
 			return w;
 	}
 
+	// Gamescope WSI can commit before main_surface is stored on the X11 window.
+	// Follow the surface backlink only during that early handoff window. Once
+	// the X11 surface has a current surface, unmatched commits are stale/helper
+	// surfaces and should not be imported into the game window.
+	wlserver_wl_surface_info *wl_info = get_wl_surface_info( surf );
+	wlserver_x11_surface_info *x11_surface = wl_info ? wl_info->x11_surface : nullptr;
+	if ( x11_surface && x11_surface->xwayland_server == ctx->xwayland_server && x11_surface->current_surface() == nullptr )
+		return find_win( ctx, x11_surface->x11_id, false );
+
 	return nullptr;
 }
 
@@ -3280,6 +3289,33 @@ win_has_game_id( steamcompmgr_win_t *w )
 	return w->appID != 0;
 }
 
+static constexpr uint32_t k_nAppIdGhostReconBreakpoint = 2231380;
+
+static bool
+win_title_contains( steamcompmgr_win_t *w, const char *pszNeedle )
+{
+	return w->title && w->title->find( pszNeedle ) != std::string::npos;
+}
+
+static uint64_t
+win_pixel_area( steamcompmgr_win_t *w )
+{
+	const auto rect = w->GetGeometry();
+	return uint64_t( rect.nWidth ) * uint64_t( rect.nHeight );
+}
+
+static bool
+win_is_ubisoft_launcher_window( steamcompmgr_win_t *w )
+{
+	if ( w->appID != k_nAppIdGhostReconBreakpoint )
+		return false;
+
+	if ( win_title_contains( w, "Ghost Recon" ) )
+		return false;
+
+	return win_title_contains( w, "Ubisoft" ) || win_title_contains( w, "Uplay" );
+}
+
 static bool
 win_is_useless( steamcompmgr_win_t *w )
 {
@@ -3417,6 +3453,19 @@ is_focus_priority_greater( steamcompmgr_win_t *a, steamcompmgr_win_t *b )
 	if ( win_is_useless( a ) != win_is_useless( b ) )
 		return !win_is_useless( a );
 
+	// Ghost Recon Breakpoint: Ubisoft Connect popups share the Steam appID but are
+	// not the game surface — prefer the main game window once it exists.
+	if ( win_is_ubisoft_launcher_window( a ) != win_is_ubisoft_launcher_window( b ) )
+		return !win_is_ubisoft_launcher_window( a );
+
+	if ( a->appID == k_nAppIdGhostReconBreakpoint && b->appID == k_nAppIdGhostReconBreakpoint )
+	{
+		const bool bMainA = win_title_contains( a, "Ghost Recon" );
+		const bool bMainB = win_title_contains( b, "Ghost Recon" );
+		if ( bMainA != bMainB )
+			return bMainA;
+	}
+
 	if ( win_maybe_a_dropdown( a ) != win_maybe_a_dropdown( b ) )
 		return !win_maybe_a_dropdown( a );
 
@@ -3427,6 +3476,14 @@ is_focus_priority_greater( steamcompmgr_win_t *a, steamcompmgr_win_t *b )
 	// See https://github.com/Plagman/gamescope/issues/87
 	if ( win_skip_and_not_fullscreen( a ) != win_skip_and_not_fullscreen( b ) )
 		return !win_skip_and_not_fullscreen( a );
+
+	if ( win_has_game_id( a ) && win_has_game_id( b ) && a->appID == b->appID )
+	{
+		const uint64_t ulAreaA = win_pixel_area( a );
+		const uint64_t ulAreaB = win_pixel_area( b );
+		if ( ulAreaA != ulAreaB )
+			return ulAreaA > ulAreaB;
+	}
 
 	// Prefer normal windows over dialogs
 	// if we are an override redirect/dropdown window.
@@ -7072,6 +7129,20 @@ static TempUpscaleImage_t *GetTempUpscaleImage( uint32_t uWidth, uint32_t uHeigh
 
 gamescope::ConVar<bool> cv_surface_update_force_only_current_surface( "surface_update_force_only_current_surface", false, "Force updates to apply only to the current surface, ignoring commits for other surfaces." );
 
+static void
+send_frame_done_for_discarded_commit( struct wlr_surface *surf )
+{
+	if ( surf == nullptr )
+		return;
+
+	struct timespec now;
+	clock_gettime( CLOCK_MONOTONIC, &now );
+
+	wlserver_lock();
+	wlserver_send_frame_done( surf, &now );
+	wlserver_unlock();
+}
+
 void update_wayland_res(CommitDoneList_t *doneCommits, steamcompmgr_win_t *w, ResListEntry_t& reslistentry)
 {
 	struct wlr_buffer *buf = reslistentry.buf;
@@ -7081,6 +7152,8 @@ void update_wayland_res(CommitDoneList_t *doneCommits, steamcompmgr_win_t *w, Re
 		wlserver_lock();
 		wlr_buffer_unlock( buf );
 		wlserver_unlock();
+
+		send_frame_done_for_discarded_commit( reslistentry.surf );
 
 		// Make sure to send the discarded event if we hit this
 		// to ensure forward progress.
@@ -7125,6 +7198,7 @@ void update_wayland_res(CommitDoneList_t *doneCommits, steamcompmgr_win_t *w, Re
 		wlr_buffer_unlock( buf );
 		wlserver_unlock();
 		w->receivedDoneCommit = true;
+		send_frame_done_for_discarded_commit( reslistentry.surf );
 		return;
 	}
 
@@ -7141,6 +7215,7 @@ void update_wayland_res(CommitDoneList_t *doneCommits, steamcompmgr_win_t *w, Re
 		wlr_buffer_unlock( buf );
 		wlserver_unlock();
 		xwm_log.warnf( "got the same buffer committed twice, ignoring." );
+		send_frame_done_for_discarded_commit( reslistentry.surf );
 
 		// If we have a duplicated commit + frame callback, ensure that is signalled.
 		// This matches Mutter and Weston behavior, so it's plausible that some application relies on forward progress.
@@ -8073,7 +8148,7 @@ static LogScope s_LaunchLogScope( "launch" );
 
 static std::vector<uint32_t> s_uRelativeMouseFilteredAppids;
 static gamescope::ConVar<std::string> cv_mouse_relative_filter_appids( "mouse_relative_filter_appids",
-"8400" /* Geometry Wars: Retro Evolved */,
+"8400,218620" /* Geometry Wars: Retro Evolved, PAYDAY 2 (Diesel DX9 cursor needs absolute mouse) */,
 "Comma separated appids to filter out using relative mouse mode for.",
 []( gamescope::ConVar<std::string> &cvar )
 {
@@ -8138,6 +8213,86 @@ void LaunchNestedChildren( char **ppPrimaryChildArgv )
 		// Enable Gamescope WSI by default for nested.
 		setenv( "ENABLE_GAMESCOPE_WSI", "1", 0 );
 
+		// Prefer the WSI layer that was built alongside this gamescope binary.
+		// Distro packages otherwise keep loading a stale /usr/... layer that
+		// lacks NVIDIA present_wait hang workarounds (and Steam/pressure-vessel
+		// often ignores ~/.local/share vulkan manifests).
+		{
+			char szExe[ PATH_MAX ]{};
+			ssize_t nLen = readlink( "/proc/self/exe", szExe, sizeof( szExe ) - 1 );
+			if ( nLen > 0 )
+			{
+				szExe[ nLen ] = '\0';
+				std::string sLayerDir = szExe;
+				auto nSlash = sLayerDir.find_last_of( '/' );
+				if ( nSlash != std::string::npos )
+				{
+					sLayerDir.resize( nSlash ); // .../build/src
+					nSlash = sLayerDir.find_last_of( '/' );
+					if ( nSlash != std::string::npos )
+					{
+						sLayerDir.resize( nSlash );
+						sLayerDir += "/layer";
+						std::string sLayerSo = sLayerDir + "/libVkLayer_FROG_gamescope_wsi_x86_64.so";
+						if ( access( sLayerSo.c_str(), R_OK ) == 0 )
+						{
+							// Loader only searches this env for JSON manifests, then
+							// follows library_path from the JSON. Meson's build/layer
+							// JSON still has an absolute install-prefix path, so write
+							// a temp manifest that points at the adjacent build .so.
+							char szJsonDir[ PATH_MAX ]{};
+							const char *pszRuntime = getenv( "XDG_RUNTIME_DIR" );
+							if ( pszRuntime && *pszRuntime )
+								snprintf( szJsonDir, sizeof( szJsonDir ), "%s/gamescope-wsi-XXXXXX", pszRuntime );
+							else
+								snprintf( szJsonDir, sizeof( szJsonDir ), "/tmp/gamescope-wsi-XXXXXX" );
+
+							if ( mkdtemp( szJsonDir ) != nullptr )
+							{
+								std::string sJsonPath = std::string( szJsonDir ) + "/VkLayer_FROG_gamescope_wsi.x86_64.json";
+								FILE *pJson = fopen( sJsonPath.c_str(), "w" );
+								if ( pJson )
+								{
+									fprintf( pJson,
+										"{\n"
+										"    \"file_format_version\" : \"1.0.0\",\n"
+										"    \"layer\" : {\n"
+										"      \"name\": \"VK_LAYER_FROG_gamescope_wsi_x86_64\",\n"
+										"      \"type\": \"GLOBAL\",\n"
+										"      \"api_version\": \"1.3.221\",\n"
+										"      \"library_path\": \"%s\",\n"
+										"      \"implementation_version\": \"1\",\n"
+										"      \"description\": \"Gamescope WSI (XWayland Bypass) Layer (x86_64)\",\n"
+										"      \"functions\": {\n"
+										"         \"vkNegotiateLoaderLayerInterfaceVersion\": \"vkNegotiateLoaderLayerInterfaceVersion\"\n"
+										"      },\n"
+										"      \"enable_environment\": {\n"
+										"        \"ENABLE_GAMESCOPE_WSI\": \"1\"\n"
+										"      },\n"
+										"      \"disable_environment\": {\n"
+										"        \"DISABLE_GAMESCOPE_WSI\": \"1\"\n"
+										"      }\n"
+										"    }\n"
+										"}\n",
+										sLayerSo.c_str() );
+									fclose( pJson );
+
+									const char *pszExisting = getenv( "VK_ADD_IMPLICIT_LAYER_PATH" );
+									std::string sPaths = szJsonDir;
+									if ( pszExisting && *pszExisting )
+									{
+										sPaths += ":";
+										sPaths += pszExisting;
+									}
+									setenv( "VK_ADD_IMPLICIT_LAYER_PATH", sPaths.c_str(), 1 );
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
 		// Unset this to avoid it leaking to Proton apps, etc.
 		unsetenv( "SDL_VIDEODRIVER" );
 		// SDL3...
@@ -8161,8 +8316,11 @@ void LaunchNestedChildren( char **ppPrimaryChildArgv )
 			gamescope::Process::WaitForChild( nPrimaryChildPid );
 			s_LaunchLogScope.infof( "Primary child shut down!" );
 
+			// Skip C++ teardown. SIGTERM → ShutdownGamescope() still races the
+			// nested SDL/Vulkan path (and mangoapp) and aborts with
+			// "terminate called without an active exception" (Steam exit 134).
 			if ( cv_shutdown_on_primary_child_death )
-				ShutdownGamescope();
+				_exit( 0 );
 		});
 		waitThread.detach();
 	}

@@ -4462,6 +4462,38 @@ bool vulkan_is_nvidia(void)
 	return g_device.isNvidiaDevice();
 }
 
+static NvidiaDriverVersion DecodeNvidiaDriverVersion( uint32_t driverVersion )
+{
+	NvidiaDriverVersion ver{};
+	ver.major = ( driverVersion >> 22 ) & 0x3ffu;
+	ver.minor = ( driverVersion >> 14 ) & 0xffu;
+	ver.tertiary = ( driverVersion >> 6 ) & 0xffu;
+	ver.patch = driverVersion & 0x3fu;
+	return ver;
+}
+
+std::optional<NvidiaDriverVersion> vulkan_get_nvidia_driver_version( void )
+{
+	if ( !g_device.isNvidiaDevice() )
+		return std::nullopt;
+
+	VkPhysicalDeviceProperties props{};
+	g_device.vk.GetPhysicalDeviceProperties( g_device.physDev(), &props );
+	return DecodeNvidiaDriverVersion( props.driverVersion );
+}
+
+bool vulkan_nvidia_driver_at_least( uint32_t major, uint32_t minor )
+{
+	const auto oVer = vulkan_get_nvidia_driver_version();
+	if ( !oVer )
+		return false;
+
+	if ( oVer->major != major )
+		return oVer->major > major;
+
+	return oVer->minor >= minor;
+}
+
 const char *vulkan_get_driver_version_summary( void )
 {
 	thread_local static char s_buf[256];
@@ -4471,12 +4503,8 @@ const char *vulkan_get_driver_version_summary( void )
 	if ( g_device.isNvidiaDevice() )
 	{
 		// NVIDIA packs driver version in props.driverVersion (see Vulkan spec / NVIDIA driver notes).
-		const uint32_t v = props.driverVersion;
-		const unsigned major = ( v >> 22 ) & 0x3ffu;
-		const unsigned minor = ( v >> 14 ) & 0xffu;
-		const unsigned tertiary = ( v >> 6 ) & 0xffu;
-		const unsigned patch = v & 0x3fu;
-		snprintf( s_buf, sizeof s_buf, "%.200s %u.%u.%u.%u", props.deviceName, major, minor, tertiary, patch );
+		const NvidiaDriverVersion ver = DecodeNvidiaDriverVersion( props.driverVersion );
+		snprintf( s_buf, sizeof s_buf, "%.200s %u.%u.%u.%u", props.deviceName, ver.major, ver.minor, ver.tertiary, ver.patch );
 	}
 	else
 	{

@@ -183,6 +183,19 @@ namespace GamescopeWSILayer {
     return s_ensureMinImageCount;
   }
 
+  // Workaround for NVIDIA + gamescope freezes where frames stop presenting
+  // while audio keeps playing (VK_KHR_present_wait). See gamescope#1592 / PR#1671.
+  // Hybrid/PRIME laptops still hit this on 575+ and 595 drivers.
+  static bool getHidePresentWait() {
+    static bool s_hidePresentWait = []() -> bool {
+      if (auto hide = parseEnv<bool>("GAMESCOPE_WSI_HIDE_PRESENT_WAIT_EXT")) {
+        return *hide;
+      }
+      return false;
+    }();
+    return s_hidePresentWait;
+  }
+
   // Taken from Mesa, licensed under MIT.
   //
   // No real reason to rewrite this code,
@@ -589,7 +602,13 @@ namespace GamescopeWSILayer {
       createInfo.ppEnabledExtensionNames = enabledExts.data();
 
       setenv("vk_xwayland_wait_ready", "false", 0);
-      setenv("vk_khr_present_wait", "true", 0);
+      if (getHidePresentWait()) {
+        // Force-disable; overwrite so gamescope/main defaults cannot re-enable it.
+        setenv("vk_khr_present_wait", "false", 1);
+        fprintf(stderr, "[Gamescope WSI] Hiding VK_KHR_present_wait (GAMESCOPE_WSI_HIDE_PRESENT_WAIT_EXT)\n");
+      } else {
+        setenv("vk_khr_present_wait", "true", 0);
+      }
 
       VkResult result = pfnCreateInstanceProc(&createInfo, pAllocator, pInstance);
       if (result != VK_SUCCESS)
@@ -900,6 +919,12 @@ namespace GamescopeWSILayer {
             VkPhysicalDevice             physicalDevice,
             VkPhysicalDeviceFeatures2*   pFeatures) {
       pDispatch->GetPhysicalDeviceFeatures2(physicalDevice, pFeatures);
+      if (getHidePresentWait()) {
+        if (auto* presentWait = vkroots::FindInChainMutable<VkPhysicalDevicePresentWaitFeaturesKHR>(pFeatures))
+          presentWait->presentWait = VK_FALSE;
+        if (auto* presentId = vkroots::FindInChainMutable<VkPhysicalDevicePresentIdFeaturesKHR>(pFeatures))
+          presentId->presentId = VK_FALSE;
+      }
     }
 
     static void GetPhysicalDeviceFeatures2KHR(
@@ -968,6 +993,22 @@ namespace GamescopeWSILayer {
         pProperties,
         physicalDevice,
         pLayerName);
+
+      // Native Vulkan titles (e.g. GRB_vulkan.exe) may enable present_wait from
+      // the extension list alone; strip it so they cannot hang on NVIDIA WSI.
+      if (getHidePresentWait() && result == VK_SUCCESS && pProperties && pPropertyCount) {
+        uint32_t out = 0;
+        for (uint32_t i = 0; i < *pPropertyCount; i++) {
+          const std::string_view name = pProperties[i].extensionName;
+          if (name == VK_KHR_PRESENT_WAIT_EXTENSION_NAME ||
+              name == VK_KHR_PRESENT_ID_EXTENSION_NAME)
+            continue;
+          if (out != i)
+            pProperties[out] = pProperties[i];
+          out++;
+        }
+        *pPropertyCount = out;
+      }
 
       return result;
     }

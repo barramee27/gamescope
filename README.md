@@ -4,7 +4,7 @@ Micro-compositor for gaming: the same role as the old `steamcompmgr`, with lower
 
 ## About this repository
 
-This fork extends [Valve’s gamescope](https://github.com/ValveSoftware/gamescope) with fixes for **NVIDIA proprietary drivers** on Linux, with emphasis on **RTX 40/50 (Blackwell)** and **driver 570+**, especially **hybrid laptops** (NVIDIA dGPU + integrated GPU running the desktop compositor).
+This fork extends [Valve’s gamescope](https://github.com/ValveSoftware/gamescope) with fixes for **NVIDIA proprietary drivers** on Linux, with emphasis on **RTX 40/50 (Blackwell)** and **driver 570+** (validated on **595+** with **Linux 7**), especially **hybrid laptops** (NVIDIA dGPU + integrated GPU running the desktop compositor).
 
 **Branch with the NVIDIA work:** `feat/nvidia-blackwell-explicit-sync`
 
@@ -18,7 +18,9 @@ Upstream changes should eventually be proposed back to Valve; this README descri
 - **Wayland backend:** If you force `--backend wayland`, DMA-BUF modifiers are checked before `create_immed` to avoid fatal protocol errors; explicit sync is not advertised for NVIDIA clients the same way as on Mesa.
 - **Preemptive upscale / timelines:** NVIDIA-specific semaphore bridging and audited error handling (no silent GPU sync skips, FD leaks fixed).
 
-**Tested by the maintainer:** RTX 5050 Laptop GPU, driver 570, Pop!_OS 24.04 (Wayland), including real games via Steam/Proton.
+**Tested by the maintainer:** RTX 5050 Laptop GPU, drivers 570–595, Pop!_OS 24.04 / Arch (Linux 6.x and 7.x, Wayland), including real games via Steam/Proton.
+
+**Linux 7 + NVIDIA 595:** Driver 595 enables `nvidia-drm modeset=1` by default, fixes Vulkan swapchain resize stalls, and improves low-VRAM fallback on Wayland. Gamescope’s existing NVIDIA paths (SDL nested backend, IN_FENCE_FD disable, SYNC_FD opt-in explicit sync) are compatible with kernel 7’s DRM syncobj stack; startup logs report kernel and driver versions.
 
 **Not a guarantee** for every NVIDIA GPU, every driver version, or nouveau. Reports with `nvidia-smi`, distro, and desktop help narrow issues.
 
@@ -36,7 +38,7 @@ In an embedded session, gamescope can flip game frames with DRM/KMS with minimal
 ## Requirements
 
 - **Mesa (AMD / Intel):** as upstream: AMD Mesa 20.3+, Intel Mesa 21.2+. Older AMD GFX8 and below may need `R600_DEBUG=nodcc` until modifier support is solid.
-- **NVIDIA proprietary:** DRM modesetting is still recommended (`nvidia-drm.modeset=1` where applicable). This fork targets recent proprietary stacks with Vulkan + DRM syncobj support; very old drivers may not match upstream gamescope’s baseline either.
+- **NVIDIA proprietary:** Driver **595+** recommended on **Linux 7**; `nvidia-drm.modeset=1` is the default on 595+. Older 570+ stacks remain supported. This fork targets recent proprietary stacks with Vulkan + DRM syncobj support; very old drivers may not match upstream gamescope’s baseline either.
 
 Build **with SDL2** for nested use on NVIDIA (`sdl2_backend` enabled in Meson).
 
@@ -103,6 +105,25 @@ __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia SDL_VIDEODRIVER=x11
 ```
 
 You do not need to “clear” launch options unless two wrappers conflict; merge env vars on one line when possible.
+
+### Ghost Recon Breakpoint (app 2231380)
+
+Ubisoft titles spawn several X11 windows (shader splash → Ubisoft Connect → `GRB_vulkan.exe`). Gamescope must pick the **main game window**, not a launcher popup or a 1×1 helper window. This fork includes focus fixes for that handoff.
+
+**Steam launch options** (match your current setup):
+
+```sh
+__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia PROTON_ENABLE_NVAPI=1 SDL_VIDEODRIVER=x11 ~/gamescope/build/src/gamescope -W 1920 -H 1080 -f -- %command%
+```
+
+**Tips if the picture disappears after “optimizing shaders” / Ubisoft Connect:**
+
+1. **Do not close Ubisoft Connect yourself** — let it finish and dismiss on its own; closing it often leaves a black gamescope surface.
+2. **Wait** through shader optimization (first launch can take several minutes).
+3. If it still fails, try **borderless** instead of fullscreen: replace `-f` with `-b`.
+4. Capture a log: add `PROTON_LOG=1` to launch options and reproduce once; check `~/steam-2231380.log` and Steam’s `console-linux.txt` for `waylandres but no win` (should be rarer with the surface-link fix).
+
+In-game, pick the **Vulkan** launcher option if Steam asks (Proton fix sets up `GRB_vulkan.exe`).
 
 ### Logs
 

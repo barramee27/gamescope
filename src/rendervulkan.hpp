@@ -424,6 +424,20 @@ bool acquire_next_image( void );
 bool vulkan_primary_dev_id(dev_t *id);
 bool vulkan_supports_modifiers(void);
 bool vulkan_is_nvidia(void);
+
+struct NvidiaDriverVersion
+{
+	uint32_t major = 0;
+	uint32_t minor = 0;
+	uint32_t tertiary = 0;
+	uint32_t patch = 0;
+};
+
+/** Decoded proprietary NVIDIA driver version from Vulkan properties. Valid after vulkan_make_output. */
+std::optional<NvidiaDriverVersion> vulkan_get_nvidia_driver_version( void );
+/** True when the active NVIDIA driver is at least major.minor (e.g. 595, 0). */
+bool vulkan_nvidia_driver_at_least( uint32_t major, uint32_t minor );
+
 /** Human-readable Vulkan device + driver version (NVIDIA decoded per vendor scheme). Valid after vulkan_make_output. */
 const char *vulkan_get_driver_version_summary(void);
 
